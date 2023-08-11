@@ -221,6 +221,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 					 */
 					zeroPad(parts[0], 4),
 					zeroPad(parts[1], 4),
+					"",
 					major,
 					minor,
 					busnum,
