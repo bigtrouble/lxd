@@ -21,7 +21,9 @@ import (
 // callbacks without needing to keep a reference to the unixHotplug device struct.
 func unixHotplugIsOurDevice(config deviceConfig.Device, unixHotplug *UnixHotplugEvent) bool {
 	// Check if event matches criteria for this device, if not return.
-	if (config["vendorid"] != "" && config["vendorid"] != unixHotplug.Vendor) || (config["productid"] != "" && config["productid"] != unixHotplug.Product) {
+	if (config["vendorid"] != "" && config["vendorid"] != unixHotplug.Vendor) || 
+		(config["productid"] != "" && config["productid"] != unixHotplug.Product) || 
+		(config["serial"] != "" && config["serial"] != unixHotplug.Serial) {
 		return false
 	}
 

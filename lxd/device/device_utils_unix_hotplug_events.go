@@ -18,6 +18,7 @@ type UnixHotplugEvent struct {
 
 	Vendor  string
 	Product string
+	Serial  string
 
 	Path        string
 	Major       uint32
