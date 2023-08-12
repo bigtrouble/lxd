@@ -127,7 +127,7 @@ func USBNewEvent(action string, vendor string, product string, serial string, ma
 			path = fmt.Sprintf("/dev/%s", devname)
 		}
 	}
-
+	logger.Info("USBNewEvent reeeeeee", logger.Ctx{"serial": serial})
 	return USBEvent{
 		action,
 		vendor,
