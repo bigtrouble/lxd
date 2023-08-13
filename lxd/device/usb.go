@@ -54,6 +54,7 @@ func (d *usb) validateConfig(instConf instance.ConfigReader) error {
 	rules := map[string]func(string) error{
 		"vendorid":  validate.Optional(validate.IsDeviceID),
 		"productid": validate.Optional(validate.IsDeviceID),
+		"serial":    validate.Optional(validate.IsAny),
 		"uid":       unixValidUserID,
 		"gid":       unixValidUserID,
 		"mode":      unixValidOctalFileMode,
