@@ -186,7 +186,8 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 				serial, ok := props["ID_SERIAL_SHORT"]
 				if !ok {
-					continue
+					serial = ""
+					logger.Error("Error reading usb device", logger.Ctx{"props": props})
 				}
 
 				major, ok := props["MAJOR"]
