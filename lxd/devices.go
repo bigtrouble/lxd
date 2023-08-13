@@ -114,7 +114,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 			ueventLen := 0
 			ueventParts := strings.Split(string(ueventBuf), "\x00")
-			logger.info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf)})
+			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf)})
 			for i, part := range ueventParts {
 				if strings.HasPrefix(part, "SEQNUM=") {
 					ueventParts = append(ueventParts[:i], ueventParts[i+1:]...)
