@@ -95,7 +95,9 @@ func UnixHotplugRunHandlers(state *state.State, event *UnixHotplugEvent) {
 }
 
 // UnixHotplugNewEvent instantiates a new UnixHotplugEvent struct.
-func UnixHotplugNewEvent(action string, vendor string, product string, major string, minor string, subsystem string, devname string, ueventParts []string, ueventLen int) (UnixHotplugEvent, error) {
+func UnixHotplugNewEvent(action string, vendor string, product string, serial string,
+	major string, minor string, subsystem string,
+	devname string, ueventParts []string, ueventLen int) (UnixHotplugEvent, error) {
 	majorInt, err := strconv.ParseUint(major, 10, 32)
 	if err != nil {
 		return UnixHotplugEvent{}, err
@@ -110,6 +112,7 @@ func UnixHotplugNewEvent(action string, vendor string, product string, major str
 		action,
 		vendor,
 		product,
+		serial,
 		devname,
 		uint32(majorInt),
 		uint32(minorInt),

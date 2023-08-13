@@ -295,6 +295,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 					 */
 					vendor,
 					product,
+					"",
 					major,
 					minor,
 					subsystem,
