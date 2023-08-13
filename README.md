@@ -100,3 +100,30 @@ You can find additional resources on the [website](https://ubuntu.com/lxd), on [
 ## Contributing
 
 Fixes and new features are greatly appreciated. Make sure to read our [contributing guidelines](CONTRIBUTING.md) first!
+
+
+
+## Build sourcecode
+```
+apt update
+apt -y upgrade
+apt -y install acl attr autoconf automake dnsmasq-base git libacl1-dev libcap-dev 
+apt -y install liblxc1 liblxc-dev libsqlite3-dev libtool libudev-dev liblz4-dev 
+apt -y install libuv1-dev make pkg-config rsync squashfs-tools tar tcl xz-utils ebtables
+apt -y install lvm2 thin-provisioning-tools
+apt -y install btrfs-progs
+apt -y install curl gettext jq sqlite3 socat bind9-dnsutils
+apt -y install shellcheck
+
+apt -y install snapd
+snap install go --classic
+```
+
+```
+git clone https://github.com/lxc/lxd
+cd lxd
+make deps
+make
+```
+
+
