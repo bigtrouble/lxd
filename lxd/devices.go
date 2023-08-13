@@ -258,6 +258,12 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 					continue
 				}
 
+				serial, ok := props["ID_SERIAL_SHORT"]
+				if !ok {
+					serial = ""
+					logger.Error("no ID_SERIAL_SHORT", logger.Ctx{"props": props})
+				}
+
 				devname, ok := props["DEVNAME"]
 				if !ok {
 					continue
@@ -275,7 +281,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 				vendor := ""
 				product := ""
-				if action == "add" {
+				if action == "add" || action == "bind" {
 					vendor, product, ok = ueventParseVendorProduct(props, subsystem, devname)
 					if !ok {
 						continue
@@ -295,6 +301,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 					product = zeroPad(product, 4)
 				}
 
+				logger.Info("=======UnixHotplugNewEvent=====", logger.Ctx{"serial:": serial, "props": props})
 				unix, err := device.UnixHotplugNewEvent(
 					action,
 					/* udev doesn't zero pad these, while
@@ -303,7 +310,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 					 */
 					vendor,
 					product,
-					"",
+					serial,
 					major,
 					minor,
 					subsystem,
