@@ -180,7 +180,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 				chNetwork <- []string{props["INTERFACE"], props["ACTION"]}
 			}
 
-			if props["SUBSYSTEM"] == "usb" && !udevEvent {
+			if props["SUBSYSTEM"] == "usb" {
 				parts := strings.Split(props["PRODUCT"], "/")
 				if len(parts) < 2 {
 					continue
