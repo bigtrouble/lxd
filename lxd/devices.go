@@ -114,7 +114,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 			ueventLen := 0
 			ueventParts := strings.Split(string(ueventBuf), "\x00")
-			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf)})
+
 			for i, part := range ueventParts {
 				if strings.HasPrefix(part, "SEQNUM=") {
 					ueventParts = append(ueventParts[:i], ueventParts[i+1:]...)
@@ -122,7 +122,6 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 				}
 			}
 
-			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf), "part": ueventParts})
 			props := map[string]string{}
 			for _, part := range ueventParts {
 				// libudev string prefix distinguishes udev events from kernel uevents
@@ -140,7 +139,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 				props[fields[0]] = fields[1]
 			}
-			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf), "part": ueventParts, "props":props})
+			logger.Info("=======ueventBuf=====", logger.Ctx{"udevEvent:": udevEvent, "props": props})
 
 			ueventLen--
 
