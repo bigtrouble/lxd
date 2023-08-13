@@ -122,6 +122,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 				}
 			}
 
+			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf), "part": ueventParts})
 			props := map[string]string{}
 			for _, part := range ueventParts {
 				// libudev string prefix distinguishes udev events from kernel uevents
@@ -139,6 +140,7 @@ func deviceNetlinkListener() (chan []string, chan []string, chan device.USBEvent
 
 				props[fields[0]] = fields[1]
 			}
+			logger.Info("=======ueventBuf=====", logger.Ctx{"ueventBuf": string(ueventBuf), "part": ueventParts, "props":props})
 
 			ueventLen--
 
