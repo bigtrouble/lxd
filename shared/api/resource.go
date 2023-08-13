@@ -857,6 +857,8 @@ type ResourcesUSBDevice struct {
 	// Transfer speed (Mbit/s)
 	// Example: 12
 	Speed float64 `json:"speed" yaml:"speed"`
+
+	Serial string `json:"serial" yaml:"serial"`
 }
 
 // ResourcesUSBDeviceInterface represents a USB device interface

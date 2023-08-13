@@ -81,6 +81,19 @@ func GetUSB() (*api.ResourcesUSB, error) {
 			return nil, fmt.Errorf("Failed to read %q: %w", filepath.Join(devicePath, "devnum"), err)
 		}
 
+		serialPath := filepath.Join(devicePath, "serial")
+		if sysfsExists(serialPath) {
+			content, err := os.ReadFile(serialPath)
+			if err != nil {
+				// skip
+				device.Serial = ""
+			} else {
+				device.Serial = strings.TrimPrefix(strings.TrimSpace(string(content)), "0x")
+			}
+		} else {
+			device.Serial = ""
+		}
+
 		// Get product ID
 		var productID uint64
 
