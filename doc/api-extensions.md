@@ -420,7 +420,7 @@ files for the container via `nofile`. The format is `limits.kernel.[limit name]`
 
 This adds support for renaming custom storage volumes.
 
-## `external_authentication`
+## `macaroon_authentication`
 
 This adds support for external authentication via Macaroons.
 
@@ -2276,3 +2276,8 @@ This allows copying storage volume snapshots to and from remotes.
 ## `zfs_delegate`
 This implements a new `zfs.delegate` volume Boolean for volumes on a ZFS storage driver.
 When enabled and a suitable system is in use (requires ZFS 2.2 or higher), the ZFS dataset will be delegated to the container, allowing for its use through the `zfs` command line tool.
+
+## `operations_get_query_all_projects`
+
+This introduces support for the `all-projects` query parameter for the GET API calls to both `/1.0/operations` and `/1.0/operations?recursion=1`.
+This parameter allows bypassing the project name filter.

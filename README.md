@@ -58,7 +58,7 @@ Consider the following aspects to ensure that your LXD installation is secure:
 - Configure your network interfaces to be secure.
 <!-- Include end security -->
 
-See [Security](https://documentation.ubuntu.com/lxd/en/latest/security/) for detailed information.
+See [Security](https://documentation.ubuntu.com/lxd/en/latest/explanation/security/) for detailed information.
 
 **IMPORTANT:**
 <!-- Include start security note -->
@@ -83,7 +83,7 @@ A discussion forum is available at: [`https://discourse.ubuntu.com/c/lxd/`](http
 
 ### IRC
 
-If you prefer live discussions, you can find us in [`#lxd`](https://web.libera.chat/#lxd) on `irc.libera.chat`. See [Getting started with IRC](https://discuss.linuxcontainers.org/t/getting-started-with-irc/11920) if needed.
+If you prefer live discussions, you can find us in [`#lxd`](https://web.libera.chat/#lxd) on `irc.libera.chat`. See [Getting started with IRC](https://discourse.ubuntu.com/t/getting-started-with-irc/37907) if needed.
 
 ### Commercial support
 

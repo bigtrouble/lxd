@@ -1,6 +1,9 @@
+import contextlib
 import datetime
 import os
+import subprocess
 import sys
+import tempfile
 import yaml
 from git import Repo
 import wget
@@ -107,7 +110,8 @@ html_theme_options = {
         "color-highlighted-background": "#EbEbEb",
         "color-link-underline": "var(--color-background-primary)",
         "color-link-underline--hover": "var(--color-background-primary)",
-        "color-version-popup": "#772953"
+        "color-version-popup": "#772953",
+        "color-orange": "#FBDDD2",
     },
     "dark_css_variables": {
         "color-foreground-secondary": "var(--color-foreground-primary)",
@@ -131,7 +135,8 @@ html_theme_options = {
         "color-highlighted-background": "#666",
         "color-link-underline": "var(--color-background-primary)",
         "color-link-underline--hover": "var(--color-background-primary)",
-        "color-version-popup": "#F29879"
+        "color-version-popup": "#F29879",
+        "color-orange": "#E95420",
     },
 }
 
@@ -180,4 +185,56 @@ if ("TOPICAL" in os.environ) and (os.environ["TOPICAL"] == "True"):
     tags.add('topical')
 else:
     exclude_patterns.extend(['index_topical.md','security.md','external_resources.md','reference/network_external.md'])
+    redirects["security/index"] = "../explanation/security/"
     tags.add('diataxis')
+
+
+@contextlib.contextmanager
+def pushd(new_dir):
+    previous_dir = os.getcwd()
+    os.chdir(new_dir)
+    try:
+        yield
+    finally:
+        os.chdir(previous_dir)
+
+
+def generate_go_docs(app):
+    """
+        This function calls the `lxd-doc` tool to generate
+        the documentation elements from an annotated Golang codebase.
+    """
+    try:
+        subprocess.run(["go", "version"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        raise ValueError("go is not installed for lxd-doc installation.")
+
+    os.environ['CGO_ENABLED'] = '0'
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        if os.getcwd().endswith("/doc"):
+            lxdMetadataDir = "../lxd/lxd-metadata"
+            lxdBaseDir = ".."
+            outputBaseDir = ""
+        else:
+            lxdMetadataDir = "lxd/lxd-metadata"
+            lxdBaseDir = "."
+            outputBaseDir = "./doc/"
+
+        with pushd(lxdMetadataDir):
+            try:
+                subprocess.run(["go", "build", "-o", os.path.join(tempdir, "lxd-metadata")], check=True)
+            except subprocess.CalledProcessError:
+                raise ValueError("Building lxd-metadata failed.")
+
+        # Generate the documentation
+        try:
+            subprocess.run([os.path.join(tempdir, "lxd-metadata"), lxdBaseDir, "-y", f"{outputBaseDir}config_options.yaml", "-t", f"{outputBaseDir}config_options.txt"], check=True)
+        except subprocess.CalledProcessError:
+            raise ValueError("Generating the codebase metadata failed.")
+
+        print("Codebase metadata generated successfully")
+
+
+def setup(app):
+    app.connect('builder-inited', generate_go_docs)

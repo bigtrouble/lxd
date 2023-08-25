@@ -1,3 +1,4 @@
+(dev-lxd)=
 # Communication between instance and host
 
 ```{youtube} https://www.youtube.com/watch?v=xZSnqqWykmo
@@ -14,7 +15,7 @@ connect to. It's multi-threaded so multiple clients can be connected at the
 same time.
 
 ```{note}
-[`security.devlxd`](instance-options-security) must be set to `true` (which is the default) for an instance to allow access to the socket.
+{config:option}`instance-security:security.devlxd` must be set to `true` (which is the default) for an instance to allow access to the socket.
 ```
 
 ## Implementation details
