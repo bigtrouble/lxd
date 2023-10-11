@@ -195,18 +195,6 @@ func (d *zfs) getDatasets(dataset string, types string) ([]string, error) {
 }
 
 func (d *zfs) setDatasetProperties(dataset string, options ...string) error {
-	if len(zfsVersion) >= 3 && zfsVersion[0:3] == "0.6" {
-		// Slow path for ZFS 0.6
-		for _, option := range options {
-			_, err := shared.RunCommand("zfs", "set", option, dataset)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
 	args := []string{"set"}
 	args = append(args, options...)
 	args = append(args, dataset)
@@ -284,7 +272,7 @@ func (d *zfs) version() (string, error) {
 	// This function is only really ever relevant on Ubuntu as the only
 	// distro that ships out of sync tools and kernel modules
 	out, err := shared.RunCommand("dpkg-query", "--showformat=${Version}", "--show", "zfsutils-linux")
-	if err == nil {
+	if out != "" && err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
 
@@ -350,7 +338,7 @@ func (d *zfs) sendDataset(dataset string, parent string, volSrcArgs *migration.V
 		}
 	}
 
-	if shared.StringInSlice("compress", volSrcArgs.MigrationType.Features) {
+	if shared.ValueInSlice("compress", volSrcArgs.MigrationType.Features) {
 		args = append(args, "-c")
 		args = append(args, "-L")
 	}

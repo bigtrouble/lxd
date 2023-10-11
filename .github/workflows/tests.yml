@@ -12,14 +12,35 @@ concurrency:
 
 jobs:
   code-tests:
+    env:
+      CGO_CFLAGS: "-I/home/runner/work/lxd/lxd-test/vendor/raft/include/ -I/home/runner/work/lxd/lxd-test/vendor/dqlite/include/"
+      CGO_LDFLAGS: "-L/home/runner/work/lxd/lxd-test/vendor/raft/.libs/ -L/home/runner/work/lxd/lxd-test/vendor/dqlite/.libs/"
+      LD_LIBRARY_PATH: "/home/runner/work/lxd/lxd-test/vendor/raft/.libs/:/home/runner/work/lxd/lxd-test/vendor/dqlite/.libs/"
+      CGO_LDFLAGS_ALLOW: "(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"
     name: Code tests
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Dependency Review
         uses: actions/dependency-review-action@v3
+        if: github.event_name == 'pull_request'
+
+      # XXX: `make static-analysis` also run shellcheck but this one provides
+      #      useful feedback in the PR through github-code-scanning bot
+      - id: ShellCheck
+        name: Differential ShellCheck
+        uses: redhat-plumbers-in-action/differential-shellcheck@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        if: github.event_name == 'pull_request'
+
+      - name: Upload artifact with ShellCheck defects in SARIF format
+        uses: actions/upload-artifact@v3
+        with:
+          name: Differential ShellCheck SARIF
+          path: ${{ steps.ShellCheck.outputs.sarif }}
         if: github.event_name == 'pull_request'
 
       - name: Install Go
@@ -30,17 +51,16 @@ jobs:
       - name: Install dependencies
         run: |
           sudo add-apt-repository ppa:ubuntu-lxc/lxc-git-master -y --no-update
-          sudo add-apt-repository ppa:dqlite/dev -y --no-update
           sudo apt-get update
 
           sudo apt-get install --no-install-recommends -y \
+            build-essential \
             curl \
             gettext \
             git \
             libacl1-dev \
             libcap-dev \
             libdbus-1-dev \
-            libdqlite-dev \
             liblxc-dev \
             lxc-templates \
             libseccomp-dev \
@@ -48,6 +68,7 @@ jobs:
             libsqlite3-dev \
             libtool \
             libudev-dev \
+            libuv1-dev \
             make \
             pkg-config \
             shellcheck
@@ -57,6 +78,19 @@ jobs:
       - name: Download go dependencies
         run: |
           go mod download
+
+      - name: Make LXD tarball and unpack it
+        env:
+          CUSTOM_VERSION: "test"
+        run: |
+          make dist
+          tar -xzf lxd-test.tar.gz -C ~/work/lxd/
+          rm lxd-test.tar.gz
+
+      - name: Build LXD dependencies
+        run: |
+          cd ~/work/lxd/lxd-test
+          make deps
 
       - name: Run LXD build
         run: |
@@ -68,7 +102,7 @@ jobs:
 
       - name: Unit tests (all)
         run: |
-          sudo go test ./...
+          sudo --preserve-env=CGO_CFLAGS,CGO_LDFLAGS,CGO_LDFLAGS_ALLOW,LD_LIBRARY_PATH LD_LIBRARY_PATH=${LD_LIBRARY_PATH} go test ./...
 
   system-tests:
     env:
@@ -106,7 +140,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Go (stable)
         uses: actions/setup-go@v4
@@ -116,7 +150,7 @@ jobs:
 
       - name: Install Go (tip)
         run: |
-          curl -sL https://storage.googleapis.com/go-build-snap/go/linux-amd64/$(git ls-remote https://github.com/golang/go.git HEAD | awk '{print $1;}').tar.gz -o gotip.tar.gz
+          curl -sSfL https://storage.googleapis.com/go-build-snap/go/linux-amd64/$(git ls-remote https://github.com/golang/go.git HEAD | awk '{print $1;}').tar.gz -o gotip.tar.gz
           ls -lah gotip.tar.gz
           mkdir -p ~/sdk/gotip
           tar -C ~/sdk/gotip -xzf gotip.tar.gz
@@ -132,6 +166,7 @@ jobs:
           sudo apt-get update
 
           sudo snap remove lxd --purge
+          sudo snap remove core20 --purge || true
           sudo apt-get autopurge moby-containerd docker uidmap -y
           sudo ip link delete docker0
           sudo nft flush ruleset
@@ -141,7 +176,6 @@ jobs:
 
           sudo apt-get install --no-install-recommends -y \
             curl \
-            dnsutils \
             git \
             libacl1-dev \
             libcap-dev \
@@ -200,7 +234,18 @@ jobs:
         if: ${{ matrix.backend == 'ceph' }}
         run: |
           set -x
-          sudo apt-get install --no-install-recommends -y snapd ceph-common
+
+          # If the rootfs and the ephemeral part are on the same physical disk, giving the whole
+          # disk to microceph would wipe our rootfs. Since it is pretty rare for GitHub Action
+          # runners to have a single disk, we immediately bail rather than trying to gracefully
+          # handle it. Once snapd releases with https://github.com/snapcore/snapd/pull/13150,
+          # we will be able to stop worrying about that special case.
+          if [ "$(stat -c '%d' /)" = "$(stat -c '%d' /mnt)" ]; then
+            echo "FAIL: rootfs and ephemeral part on the same disk, aborting"
+            exit 1
+          fi
+
+          sudo apt-get install --no-install-recommends -y ceph-common
           sudo snap install microceph --edge
           sleep 5
           sudo microceph cluster bootstrap
@@ -212,17 +257,11 @@ jobs:
           for flag in nosnaptrim noscrub nobackfill norebalance norecover noscrub nodeep-scrub; do
               sudo microceph.ceph osd set $flag
           done
-          # Use ephemeral disk mounted on /mnt for ceph OSD.
-          # The block-devices plug doesn't allow accessing /dev/loopX devices so we make those same devices
-          # available under alternate names (/dev/sdiY) that are not used inside GitHub Action runners.
+          # Repurpose the ephemeral disk for ceph OSD.
           sudo swapoff /mnt/swapfile
-          sudo rm -f /mnt/swapfile
-          loop_file="/mnt/ceph-osd.img"
-          sudo fallocate -l 10G "${loop_file}"
-          loop_dev="$(sudo losetup --show --direct-io=on --nooverlap -f "${loop_file}")"
-          devInfo=($(sudo stat -c '%t %T' "${loop_dev}"))
-          sudo mknod -m 0660 /dev/sdia b 0x"${devInfo[0]}" 0x"${devInfo[1]}"
-          sudo microceph disk add --wipe /dev/sdia
+          ephemeral_disk="$(findmnt --noheadings --output SOURCE --target /mnt | sed 's/[0-9]\+$//')"
+          sudo umount /mnt
+          sudo microceph disk add --wipe "${ephemeral_disk}"
           sudo rm -rf /etc/ceph
           sudo ln -s /var/snap/microceph/current/conf/ /etc/ceph
           sudo microceph enable rgw
@@ -256,7 +295,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Go
         uses: actions/setup-go@v4
@@ -267,18 +306,27 @@ jobs:
         run: |
             mkdir bin
 
-      - name: Build static lxc
+      - name: Build static lxc (x86_64)
         env:
           CGO_ENABLED: 0
+          GOARCH: amd64
         run: |
-          go build -o bin ./lxc
+          go build -o bin/lxc.x86_64 ./lxc
+
+      - name: Build static lxc (aarch64)
+        env:
+          CGO_ENABLED: 0
+          GOARCH: arm64
+        run: |
+          go build -o bin/lxc.aarch64 ./lxc
 
       - name: Build static lxd-migrate
         if: runner.os == 'Linux'
         env:
           CGO_ENABLED: 0
         run: |
-          go build -o bin ./lxd-migrate
+          GOARCH=amd64 go build -o bin/lxd-migrate.x86_64 ./lxd-migrate
+          GOARCH=arm64 go build -o bin/lxd-migrate.aarch64 ./lxd-migrate
 
       - name: Unit tests (client)
         env:
@@ -307,7 +355,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -326,7 +374,7 @@ jobs:
         uses: get-woke/woke-action@v0
         with:
           fail-on-error: true
-          woke-args: "*.md **/*.md -c https://github.com/canonical-web-and-design/Inclusive-naming/raw/main/config.yml"
+          woke-args: "*.md **/*.md -c https://github.com/canonical/Inclusive-naming/raw/main/config.yml"
 
       - name: Run link checker
         run: |
@@ -349,19 +397,21 @@ jobs:
     name: Trigger snap edge build
     runs-on: ubuntu-22.04
     needs: [code-tests, system-tests, client, documentation]
-    if: ${{ github.repository == 'canonical/lxd' && github.event_name == 'push'}}
+    if: ${{ github.repository == 'canonical/lxd' && github.event_name == 'push' && github.actor != 'dependabot[bot]' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Launchpad SSH access
         env:
           SSH_AUTH_SOCK: /tmp/ssh_agent.sock
           LAUNCHPAD_LXD_BOT_KEY: ${{ secrets.LAUNCHPAD_LXD_BOT_KEY }}
         run: |
+          set -eux
+          mkdir -m 0700 -p ~/.ssh/
           ssh-agent -a "${SSH_AUTH_SOCK}" > /dev/null
           ssh-add - <<< "${{ secrets.LAUNCHPAD_LXD_BOT_KEY }}"
-          mkdir -m 0700 -p ~/.ssh/
+          ssh-add -L > ~/.ssh/id_ed25519.pub
           # In ephemeral environments like GitHub Action runners, relying on TOFU isn't providing any security
           # so require the key obtained by `ssh-keyscan` to match the expected hash from https://help.launchpad.net/SSHFingerprints
           ssh-keyscan git.launchpad.net >> ~/.ssh/known_hosts
@@ -381,10 +431,14 @@ jobs:
               "stable-5.0": "5.0-edge",
             }')[github.ref_name] }}
         run: |
-          set -x
+          set -eux
+          git config --global transfer.fsckobjects true
           git config --global user.name "Canonical LXD Bot"
           git config --global user.email "lxd@lists.canonical.com"
-          localRev=$(git rev-parse HEAD)
+          git config --global commit.gpgsign true
+          git config --global gpg.format "ssh"
+          git config --global user.signingkey ~/.ssh/id_ed25519.pub
+          localRev="$(git rev-parse HEAD)"
           go install github.com/canonical/lxd-ci/lxd-snapcraft@latest
           git clone -b "${TARGET}" git+ssh://lxdbot@git.launchpad.net/~canonical-lxd/lxd ~/lxd-pkg-snap-lp
           cd ~/lxd-pkg-snap-lp

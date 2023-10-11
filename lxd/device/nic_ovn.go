@@ -39,7 +39,7 @@ type ovnNet interface {
 	InstanceDevicePortStart(opts *network.OVNInstanceNICSetupOpts, securityACLsRemove []string) (openvswitch.OVNSwitchPort, []net.IP, error)
 	InstanceDevicePortStop(ovsExternalOVNPort openvswitch.OVNSwitchPort, opts *network.OVNInstanceNICStopOpts) error
 	InstanceDevicePortRemove(instanceUUID string, deviceName string, deviceConfig deviceConfig.Device) error
-	InstanceDevicePortDynamicIPs(instanceUUID string, deviceName string) ([]net.IP, error)
+	InstanceDevicePortIPs(instanceUUID string, deviceName string) ([]net.IP, error)
 }
 
 type nicOVN struct {
@@ -163,6 +163,11 @@ func (d *nicOVN) validateConfig(instConf instance.ConfigReader) error {
 		// Check that DHCPv6 is enabled on parent network (needed to use static assigned IPs).
 		if n.DHCPv6Subnet() == nil || shared.IsFalseOrEmpty(netConfig["ipv6.dhcp.stateful"]) {
 			return fmt.Errorf("Cannot specify %q when DHCP or %q are disabled on network %q", "ipv6.address", "ipv6.dhcp.stateful", d.config["network"])
+		}
+
+		// Static IPv6 is allowed only if static IPv4 is set as well.
+		if d.config["ipv4.address"] == "" {
+			return fmt.Errorf("Cannot specify %q when %q is not set", "ipv6.address", "ipv4.address")
 		}
 
 		ip, subnet, err := net.ParseCIDR(netConfig["ipv6.address"])
@@ -723,7 +728,7 @@ func (d *nicOVN) Update(oldDevices deviceConfig.Devices, isRunning bool) error {
 		newACLs := shared.SplitNTrimSpace(d.config["security.acls"], ",", -1, true)
 		removedACLs := []string{}
 		for _, oldACL := range oldACLs {
-			if !shared.StringInSlice(oldACL, newACLs) {
+			if !shared.ValueInSlice(oldACL, newACLs) {
 				removedACLs = append(removedACLs, oldACL)
 			}
 		}
@@ -996,26 +1001,26 @@ func (d *nicOVN) State() (*api.InstanceStateNetwork, error) {
 	// OVN only supports dynamic IP allocation if neither IPv4 or IPv6 are statically set.
 	if d.config["ipv4.address"] == "" && d.config["ipv6.address"] == "" {
 		instanceUUID := d.inst.LocalConfig()["volatile.uuid"]
-		dynamicIPs, err := d.network.InstanceDevicePortDynamicIPs(instanceUUID, d.name)
+		devIPs, err := d.network.InstanceDevicePortIPs(instanceUUID, d.name)
 		if err == nil {
-			for _, dynamicIP := range dynamicIPs {
+			for _, devIP := range devIPs {
 				family := "inet"
 				netmask := v4mask
 
-				if dynamicIP.To4() == nil {
+				if devIP.To4() == nil {
 					family = "inet6"
 					netmask = v6mask
 				}
 
 				addresses = append(addresses, api.InstanceStateNetworkAddress{
 					Family:  family,
-					Address: dynamicIP.String(),
+					Address: devIP.String(),
 					Netmask: netmask,
 					Scope:   "global",
 				})
 			}
 		} else {
-			d.logger.Warn("Failed getting OVN port dynamic IPs", logger.Ctx{"err": err})
+			d.logger.Warn("Failed getting OVN port device IPs", logger.Ctx{"err": err})
 		}
 	} else {
 		if d.config["ipv4.address"] != "" {

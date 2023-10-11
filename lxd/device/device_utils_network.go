@@ -486,33 +486,33 @@ func networkNICRouteDelete(routeDev string, routes ...string) {
 }
 
 // networkSetupHostVethLimits applies any network rate limits to the veth device specified in the config.
-func networkSetupHostVethLimits(m deviceConfig.Device) error {
+func networkSetupHostVethLimits(d *deviceCommon, oldConfig deviceConfig.Device, bridged bool) error {
 	var err error
 
-	veth := m["host_name"]
+	veth := d.config["host_name"]
 
 	if veth == "" || !network.InterfaceExists(veth) {
 		return fmt.Errorf("Unknown or missing host side veth device %q", veth)
 	}
 
 	// Apply max limit
-	if m["limits.max"] != "" {
-		m["limits.ingress"] = m["limits.max"]
-		m["limits.egress"] = m["limits.max"]
+	if d.config["limits.max"] != "" {
+		d.config["limits.ingress"] = d.config["limits.max"]
+		d.config["limits.egress"] = d.config["limits.max"]
 	}
 
 	// Parse the values
 	var ingressInt int64
-	if m["limits.ingress"] != "" {
-		ingressInt, err = units.ParseBitSizeString(m["limits.ingress"])
+	if d.config["limits.ingress"] != "" {
+		ingressInt, err = units.ParseBitSizeString(d.config["limits.ingress"])
 		if err != nil {
 			return err
 		}
 	}
 
 	var egressInt int64
-	if m["limits.egress"] != "" {
-		egressInt, err = units.ParseBitSizeString(m["limits.egress"])
+	if d.config["limits.egress"] != "" {
+		egressInt, err = units.ParseBitSizeString(d.config["limits.egress"])
 		if err != nil {
 			return err
 		}
@@ -525,7 +525,7 @@ func networkSetupHostVethLimits(m deviceConfig.Device) error {
 	_ = qdisc.Delete()
 
 	// Apply new limits
-	if m["limits.ingress"] != "" {
+	if d.config["limits.ingress"] != "" {
 		qdiscHTB := &ip.QdiscHTB{Qdisc: ip.Qdisc{Dev: veth, Handle: "1:0", Root: true}, Default: "10"}
 		err := qdiscHTB.Add()
 		if err != nil {
@@ -545,7 +545,7 @@ func networkSetupHostVethLimits(m deviceConfig.Device) error {
 		}
 	}
 
-	if m["limits.egress"] != "" {
+	if d.config["limits.egress"] != "" {
 		qdisc = &ip.Qdisc{Dev: veth, Handle: "ffff:0", Ingress: true}
 		err := qdisc.Add()
 		if err != nil {
@@ -560,12 +560,50 @@ func networkSetupHostVethLimits(m deviceConfig.Device) error {
 		}
 	}
 
+	var networkPriority uint64
+	if d.config["limits.priority"] != "" {
+		networkPriority, err = strconv.ParseUint(d.config["limits.priority"], 10, 32)
+		if err != nil {
+			return fmt.Errorf("Failed to parse limits.priority %q: %w", d.config["limits.priority"], err)
+		}
+	}
+
+	if oldConfig != nil && oldConfig["limits.priority"] != d.config["limits.priority"] {
+		err = d.state.Firewall.InstanceClearNetPrio(d.inst.Project().Name, d.inst.Name(), veth)
+		if err != nil {
+			return err
+		}
+	}
+
+	if oldConfig == nil || (oldConfig != nil && oldConfig["limits.priority"] != d.config["limits.priority"]) {
+		if networkPriority != 0 {
+			if bridged && d.state.Firewall.String() == "xtables" {
+				return fmt.Errorf("Failed to setup instance device network priority. The xtables firewall driver does not support required functionality.")
+			}
+
+			err = d.state.Firewall.InstanceSetupNetPrio(d.inst.Project().Name, d.inst.Name(), veth, uint32(networkPriority))
+			if err != nil {
+				return fmt.Errorf("Failed to setup instance device network priority: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// networkClearHostVethLimits clears any network rate limits to the veth device specified in the config.
+func networkClearHostVethLimits(d *deviceCommon) error {
+	err := d.state.Firewall.InstanceClearNetPrio(d.inst.Project().Name, d.inst.Name(), d.config["host_name"])
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // networkValidGateway validates the gateway value.
 func networkValidGateway(value string) error {
-	if shared.StringInSlice(value, []string{"none", "auto"}) {
+	if shared.ValueInSlice(value, []string{"none", "auto"}) {
 		return nil
 	}
 
@@ -901,18 +939,36 @@ func networkSRIOVRestoreVF(d deviceCommon, useSpoofCheck bool, volatile map[stri
 func networkPCIBindWaitInterface(pciDev pcidev.Device, ifName string) error {
 	var err error
 
+	waitDuration := time.Second * 10
+	waitUntil := time.Now().Add(waitDuration)
+
 	// Keep requesting the device driver be probed in case it was not ready previously or the expected
 	// interface has not appeared yet. The device can be probed multiple times safely.
-	for i := 0; i < 10; i++ {
+
+	i := 0
+	for {
 		err = pcidev.DeviceProbe(pciDev)
 		if err == nil && network.InterfaceExists(ifName) {
 			return nil
 		}
 
-		time.Sleep(50 * time.Millisecond)
-	}
+		if time.Now().After(waitUntil) {
+			if err != nil {
+				return fmt.Errorf("Failed binding interface %q after %v: %w", ifName, waitDuration, err)
+			}
 
-	return fmt.Errorf("Failed to bind interface %q: %w", ifName, err)
+			return fmt.Errorf("Failed binding interface %q after %v", ifName, waitDuration)
+		}
+
+		if i <= 5 {
+			// Retry more quickly early on.
+			time.Sleep(time.Millisecond * time.Duration(i) * 10)
+		} else {
+			time.Sleep(time.Second)
+		}
+
+		i++
+	}
 }
 
 // networkSRIOVSetupContainerVFNIC configures the VF NIC interface ready for moving into container.

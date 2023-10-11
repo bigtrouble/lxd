@@ -83,6 +83,10 @@ cleanup() {
     read -r _
   fi
 
+  echo ""
+  echo "df -h output:"
+  df -h
+
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "==> Skipping cleanup (GitHub Action runner detected)"
   else
@@ -329,6 +333,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_storage_driver_zfs "zfs storage driver"
     run_test test_storage_buckets "storage buckets"
     run_test test_storage_volume_import "storage volume import"
+    run_test test_storage_volume_initial_config "storage volume initial configuration"
     run_test test_resources "resources"
     run_test test_kernel_limits "kernel limits"
     run_test test_macaroon_auth "macaroon authentication"
@@ -353,6 +358,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_warnings "Warnings"
     run_test test_metrics "Metrics"
     run_test test_storage_volume_recover "Recover storage volumes"
+    run_test test_syslog_socket "Syslog socket"
 fi
 
 # shellcheck disable=SC2034

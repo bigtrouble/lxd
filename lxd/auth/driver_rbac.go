@@ -186,6 +186,10 @@ func (r *rbac) startStatusCheck() {
 
 	go func() {
 		for {
+			if r.ctx.Err() != nil {
+				return
+			}
+
 			if status.LastChange != "" {
 				values := url.Values{}
 				values.Set("last-change", status.LastChange)
@@ -358,7 +362,7 @@ func (r *rbac) UserAccess(username string) (*UserAccess, error) {
 
 	// Prepare the response.
 	access := UserAccess{
-		Admin:    shared.StringInSlice("admin", permissions[""]),
+		Admin:    shared.ValueInSlice("admin", permissions[""]),
 		Projects: map[string][]string{},
 	}
 
@@ -431,7 +435,7 @@ func (r *rbac) syncAdmin(username string) bool {
 		return false
 	}
 
-	return shared.StringInSlice("admin", permissions[""])
+	return shared.ValueInSlice("admin", permissions[""])
 }
 
 func (r *rbac) syncPermissions(username string) error {

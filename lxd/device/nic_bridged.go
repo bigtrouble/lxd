@@ -75,6 +75,7 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 		"limits.ingress",
 		"limits.egress",
 		"limits.max",
+		"limits.priority",
 		"ipv4.address",
 		"ipv6.address",
 		"ipv4.routes",
@@ -119,7 +120,7 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 			}
 
 			parentAddress := netConfig["ipv4.address"]
-			if shared.StringInSlice(parentAddress, []string{"", "none"}) {
+			if shared.ValueInSlice(parentAddress, []string{"", "none"}) {
 				return nil
 			}
 
@@ -154,7 +155,7 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 			}
 
 			parentAddress := netConfig["ipv6.address"]
-			if shared.StringInSlice(parentAddress, []string{"", "none"}) {
+			if shared.ValueInSlice(parentAddress, []string{"", "none"}) {
 				return nil
 			}
 
@@ -175,7 +176,7 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 
 		// When we know the parent network is managed, we can validate the NIC's VLAN settings based on
 		// on the bridge driver type.
-		if shared.StringInSlice(netConfig["bridge.driver"], []string{"", "native"}) {
+		if shared.ValueInSlice(netConfig["bridge.driver"], []string{"", "native"}) {
 			// Check VLAN 0 isn't set when using a native Linux managed bridge, as not supported.
 			if d.config["vlan"] == "0" {
 				return fmt.Errorf("VLAN ID 0 is not allowed for native Linux bridges")
@@ -456,7 +457,7 @@ func (d *nicBridged) UpdatableFields(oldDevice Type) []string {
 		return []string{}
 	}
 
-	return []string{"limits.ingress", "limits.egress", "limits.max", "ipv4.routes", "ipv6.routes", "ipv4.routes.external", "ipv6.routes.external", "ipv4.address", "ipv6.address", "security.mac_filtering", "security.ipv4_filtering", "security.ipv6_filtering"}
+	return []string{"limits.ingress", "limits.egress", "limits.max", "limits.priority", "ipv4.routes", "ipv6.routes", "ipv4.routes.external", "ipv6.routes.external", "ipv4.address", "ipv6.address", "security.mac_filtering", "security.ipv4_filtering", "security.ipv6_filtering"}
 }
 
 // Add is run when a device is added to a non-snapshot instance whether or not the instance is running.
@@ -557,7 +558,7 @@ func (d *nicBridged) Start() (*deviceConfig.RunConfig, error) {
 	}
 
 	// Apply host-side limits.
-	err = networkSetupHostVethLimits(d.config)
+	err = networkSetupHostVethLimits(&d.deviceCommon, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -741,7 +742,7 @@ func (d *nicBridged) Update(oldDevices deviceConfig.Devices, isRunning bool) err
 		}
 
 		// Apply host-side limits.
-		err = networkSetupHostVethLimits(d.config)
+		err = networkSetupHostVethLimits(&d.deviceCommon, oldConfig, true)
 		if err != nil {
 			return err
 		}
@@ -796,6 +797,14 @@ func (d *nicBridged) Update(oldDevices deviceConfig.Devices, isRunning bool) err
 func (d *nicBridged) Stop() (*deviceConfig.RunConfig, error) {
 	// Remove BGP announcements.
 	err := bgpRemovePrefix(&d.deviceCommon, d.config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate device config with volatile fields (hwaddr and host_name) if needed.
+	networkVethFillFromVolatile(d.config, d.volatileGet())
+
+	err = networkClearHostVethLimits(&d.deviceCommon)
 	if err != nil {
 		return nil, err
 	}
@@ -1660,14 +1669,14 @@ func (d *nicBridged) State() (*api.InstanceStateNetwork, error) {
 
 		// Add any valid-state neighbour IP entries first.
 		for _, neighIP := range neighIPs {
-			if shared.StringInSlice(string(neighIP.State), validStates) {
+			if shared.ValueInSlice(string(neighIP.State), validStates) {
 				ipStore(neighIP.Addr)
 			}
 		}
 
 		// Add any non-failed-state entries.
 		for _, neighIP := range neighIPs {
-			if neighIP.State != ip.NeighbourIPStateFailed && !shared.StringInSlice(string(neighIP.State), validStates) {
+			if neighIP.State != ip.NeighbourIPStateFailed && !shared.ValueInSlice(string(neighIP.State), validStates) {
 				ipStore(neighIP.Addr)
 			}
 		}

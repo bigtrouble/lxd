@@ -6,7 +6,7 @@ relatedlinks: https://www.youtube.com/watch?v=pM0EgUqj2a0
 (remote-image-servers)=
 # Remote image servers
 
-The `lxc` CLI command comes pre-configured with the following default remote image servers:
+The [`lxc`](lxc.md) CLI command comes pre-configured with the following default remote image servers:
 
 `ubuntu:`
 : This server provides official stable Ubuntu images.
@@ -19,6 +19,18 @@ The `lxc` CLI command comes pre-configured with the following default remote ima
   All images are cloud images, which means that they include both `cloud-init` and the `lxd-agent`.
 
   See [`cloud-images.ubuntu.com/daily`](https://cloud-images.ubuntu.com/daily/) for an overview of available images.
+
+`ubuntu-minimal:`
+: This server provides official Ubuntu Minimal images.
+  All images are cloud images, which means that they include both `cloud-init` and the `lxd-agent`.
+
+  See [`cloud-images.ubuntu.com/minimal/releases`](https://cloud-images.ubuntu.com/minimal/releases/) for an overview of available images.
+
+`ubuntu-minimal-daily:`
+: This server provides official daily Ubuntu Minimal images.
+  All images are cloud images, which means that they include both `cloud-init` and the `lxd-agent`.
+
+  See [`cloud-images.ubuntu.com/minimal/daily`](https://cloud-images.ubuntu.com/minimal/daily/) for an overview of available images.
 
 `images:`
 : This server provides unofficial images for a variety of Linux distributions.

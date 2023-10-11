@@ -118,6 +118,11 @@ func (c *Config) StorageImagesVolume() string {
 	return c.m.GetString("storage.images_volume")
 }
 
+// SyslogSocket returns true if the syslog socket is enabled, otherwise false.
+func (c *Config) SyslogSocket() bool {
+	return c.m.GetBool("core.syslog_socket")
+}
+
 // Dump current configuration keys and their values. Keys with values matching
 // their defaults are omitted.
 func (c *Config) Dump() map[string]any {
@@ -157,7 +162,7 @@ func (c *Config) update(values map[string]any) (map[string]string, error) {
 var ConfigSchema = config.Schema{
 	// Network address for this LXD server
 
-	// lxddoc:generate(group=server-core, key=core.https_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.https_address)
 	// See {ref}`server-expose`.
 	// ---
 	//  type: string
@@ -167,7 +172,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for cluster communication
 
-	// lxddoc:generate(group=server-cluster, key=cluster.https_address)
+	// lxdmeta:generate(entity=server, group=cluster, key=cluster.https_address)
 	// See {ref}`cluster-https-address`.
 	// ---
 	//  type: string
@@ -177,7 +182,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for the BGP server
 
-	// lxddoc:generate(group=server-core, key=core.bgp_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.bgp_address)
 	// See {ref}`network-bgp`.
 	// ---
 	//  type: string
@@ -187,7 +192,7 @@ var ConfigSchema = config.Schema{
 
 	// Unique router ID for the BGP server
 
-	// lxddoc:generate(group=server-core, key=core.bgp_routerid)
+	// lxdmeta:generate(entity=server, group=core, key=core.bgp_routerid)
 	// The identifier must be formatted as an IPv4 address.
 	// ---
 	//  type: string
@@ -197,7 +202,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for the debug server
 
-	// lxddoc:generate(group=server-core, key=core.debug_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.debug_address)
 	//
 	// ---
 	//  type: string
@@ -207,7 +212,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for the DNS server
 
-	// lxddoc:generate(group=server-core, key=core.dns_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.dns_address)
 	// See {ref}`network-dns-server`.
 	// ---
 	//  type: string
@@ -217,7 +222,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for the metrics server
 
-	// lxddoc:generate(group=server-core, key=core.metrics_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.metrics_address)
 	// See {ref}`metrics`.
 	// ---
 	//  type: string
@@ -227,7 +232,7 @@ var ConfigSchema = config.Schema{
 
 	// Network address for the storage buckets server
 
-	// lxddoc:generate(group=server-core, key=core.storage_buckets_address)
+	// lxdmeta:generate(entity=server, group=core, key=core.storage_buckets_address)
 	// See {ref}`howto-storage-buckets`.
 	// ---
 	//  type: string
@@ -235,27 +240,37 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Address to bind the storage object server to (HTTPS)
 	"core.storage_buckets_address": {Validator: validate.Optional(validate.IsListenAddress(true, true, false))},
 
+	// Syslog socket
+
+	// lxdmeta:generate(entity=server, group=core, key=core.syslog_socket)
+	// Set this option to `true` to enable the syslog unixgram socket to receive log messages from external processes.
+	// ---
+	//  type: bool
+	//  scope: local
+	//  shortdesc: Whether to enable the syslog unixgram socket listener
+	"core.syslog_socket": {Validator: validate.Optional(validate.IsBool), Type: config.Bool},
+
 	// MAAS machine this LXD instance is associated with
 
-	// lxddoc:generate(group=server-miscellaneous, key=maas.machine)
+	// lxdmeta:generate(entity=server, group=miscellaneous, key=maas.machine)
 	//
 	// ---
 	//  type: string
 	//  scope: local
-	//  default: host name
+	//  defaultdesc: host name
 	//  shortdesc: Name of this LXD host in MAAS
 	"maas.machine": {},
 
 	// Storage volumes to store backups/images on
 
-	// lxddoc:generate(group=server-miscellaneous, key=storage.backups_volume)
+	// lxdmeta:generate(entity=server, group=miscellaneous, key=storage.backups_volume)
 	// Specify the volume using the syntax `POOL/VOLUME`.
 	// ---
 	//  type: string
 	//  scope: local
 	//  shortdesc: Volume to use to store backup tarballs
 	"storage.backups_volume": {},
-	// lxddoc:generate(group=server-miscellaneous, key=storage.images_volume)
+	// lxdmeta:generate(entity=server, group=miscellaneous, key=storage.images_volume)
 	// Specify the volume using the syntax `POOL/VOLUME`.
 	// ---
 	//  type: string

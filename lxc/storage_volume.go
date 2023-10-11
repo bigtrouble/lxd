@@ -97,13 +97,13 @@ Unless specified through a prefix, all volume operations affect "custom" (user c
 	storageVolumeListCmd := cmdStorageVolumeList{global: c.global, storage: c.storage, storageVolume: c}
 	cmd.AddCommand(storageVolumeListCmd.Command())
 
-	// Move
-	storageVolumeMoveCmd := cmdStorageVolumeMove{global: c.global, storage: c.storage, storageVolume: c, storageVolumeCopy: &storageVolumeCopyCmd}
-	cmd.AddCommand(storageVolumeMoveCmd.Command())
-
 	// Rename
 	storageVolumeRenameCmd := cmdStorageVolumeRename{global: c.global, storage: c.storage, storageVolume: c}
 	cmd.AddCommand(storageVolumeRenameCmd.Command())
+
+	// Move
+	storageVolumeMoveCmd := cmdStorageVolumeMove{global: c.global, storage: c.storage, storageVolume: c, storageVolumeCopy: &storageVolumeCopyCmd, storageVolumeRename: &storageVolumeRenameCmd}
+	cmd.AddCommand(storageVolumeMoveCmd.Command())
 
 	// Set
 	storageVolumeSetCmd := cmdStorageVolumeSet{global: c.global, storage: c.storage, storageVolume: c}
@@ -135,7 +135,7 @@ func (c *cmdStorageVolume) parseVolume(defaultType string, name string) (string,
 	fields := strings.SplitN(name, "/", 2)
 	if len(fields) == 1 {
 		return fields[0], defaultType
-	} else if len(fields) == 2 && !shared.StringInSlice(fields[0], []string{"custom", "image", "container", "virtual-machine"}) {
+	} else if len(fields) == 2 && !shared.ValueInSlice(fields[0], []string{"custom", "image", "container", "virtual-machine"}) {
 		return name, defaultType
 	}
 
@@ -1598,10 +1598,11 @@ func (c *cmdStorageVolumeList) projectColumnData(vol api.StorageVolume, state ap
 
 // Move.
 type cmdStorageVolumeMove struct {
-	global            *cmdGlobal
-	storage           *cmdStorage
-	storageVolume     *cmdStorageVolume
-	storageVolumeCopy *cmdStorageVolumeCopy
+	global              *cmdGlobal
+	storage             *cmdStorage
+	storageVolume       *cmdStorageVolume
+	storageVolumeCopy   *cmdStorageVolumeCopy
+	storageVolumeRename *cmdStorageVolumeRename
 }
 
 func (c *cmdStorageVolumeMove) Command() *cobra.Command {
@@ -1626,6 +1627,53 @@ func (c *cmdStorageVolumeMove) Run(cmd *cobra.Command, args []string) error {
 	exit, err := c.global.CheckArgs(cmd, args, 2, 2)
 	if exit {
 		return err
+	}
+
+	// Parse remote
+	resources, err := c.global.ParseServers(args[0], args[1])
+	if err != nil {
+		return err
+	}
+
+	// Source
+	srcResource := resources[0]
+	if srcResource.name == "" {
+		return fmt.Errorf(i18n.G("Missing source volume name"))
+	}
+
+	srcRemote := srcResource.remote
+	srcPath := srcResource.name
+
+	// Get source pool and volume name
+	srcVolName, srcVolPool := c.storageVolume.parseVolumeWithPool(srcPath)
+	if srcVolPool == "" {
+		return fmt.Errorf(i18n.G("No storage pool for source volume specified"))
+	}
+
+	// Destination
+	dstResource := resources[1]
+	dstRemote := dstResource.remote
+	dstPath := dstResource.name
+
+	// Get target pool and volume name
+	dstVolName, dstVolPool := c.storageVolume.parseVolumeWithPool(dstPath)
+	if dstVolPool == "" {
+		return fmt.Errorf(i18n.G("No storage pool for target volume specified"))
+	}
+
+	// Rename volume if both remotes and pools of source and target are equal.
+	if srcRemote == dstRemote && srcVolPool == dstVolPool {
+		var args []string
+
+		if srcRemote != "" {
+			args = append(args, fmt.Sprintf("%s:%s", srcRemote, srcVolPool))
+		} else {
+			args = append(args, srcVolPool)
+		}
+
+		args = append(args, srcVolName, dstVolName)
+
+		return c.storageVolumeRename.Run(cmd, args)
 	}
 
 	return c.storageVolumeCopy.Run(cmd, args)
@@ -2437,7 +2485,7 @@ func (c *cmdStorageVolumeImport) Run(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// Validate type flag
-		if !shared.StringInSlice(c.flagType, []string{"backup", "iso"}) {
+		if !shared.ValueInSlice(c.flagType, []string{"backup", "iso"}) {
 			return fmt.Errorf("Import type needs to be \"backup\" or \"iso\"")
 		}
 	}

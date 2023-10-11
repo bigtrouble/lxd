@@ -115,7 +115,7 @@ func (c *cmdConfigTrustAdd) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validate flags.
-	if !shared.StringInSlice(c.flagType, []string{"client", "metrics"}) {
+	if !shared.ValueInSlice(c.flagType, []string{"client", "metrics"}) {
 		return fmt.Errorf(i18n.G("Unknown certificate type %q"), c.flagType)
 	}
 
@@ -152,7 +152,7 @@ func (c *cmdConfigTrustAdd) Run(cmd *cobra.Command, args []string) error {
 		if c.flagName != "" {
 			cert.Name = c.flagName
 		} else {
-			cert.Name, err = cli.AskString(i18n.G("Please provide client name: "), "", nil)
+			cert.Name, err = c.global.asker.AskString(i18n.G("Please provide client name: "), "", nil)
 			if err != nil {
 				return err
 			}

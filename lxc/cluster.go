@@ -548,7 +548,7 @@ Are you really sure you want to force removing %s? (yes/no): `), name)
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSuffix(input, "\n")
 
-	if !shared.StringInSlice(strings.ToLower(input), []string{i18n.G("yes")}) {
+	if !shared.ValueInSlice(strings.ToLower(input), []string{i18n.G("yes")}) {
 		return fmt.Errorf(i18n.G("User aborted delete operation"))
 	}
 
@@ -831,7 +831,7 @@ func (c *cmdClusterAdd) Run(cmd *cobra.Command, args []string) error {
 
 	if resource.name == "" {
 		if c.flagName == "" {
-			resource.name, err = cli.AskString(i18n.G("Please provide cluster member name: "), "", nil)
+			resource.name, err = c.global.asker.AskString(i18n.G("Please provide cluster member name: "), "", nil)
 			if err != nil {
 				return err
 			}
@@ -1219,7 +1219,7 @@ func (c *cmdClusterEvacuateAction) Run(cmd *cobra.Command, args []string) error 
 	}
 
 	if !c.flagForce {
-		evacuate, err := cli.AskBool(fmt.Sprintf(i18n.G("Are you sure you want to %s cluster member %q? (yes/no) [default=no]: "), cmd.Name(), resource.name), "no")
+		evacuate, err := c.global.asker.AskBool(fmt.Sprintf(i18n.G("Are you sure you want to %s cluster member %q? (yes/no) [default=no]: "), cmd.Name(), resource.name), "no")
 		if err != nil {
 			return err
 		}

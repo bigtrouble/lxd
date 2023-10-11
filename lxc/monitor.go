@@ -43,7 +43,6 @@ lxc monitor --pretty --type=logging --loglevel=info
 
 lxc monitor --type=lifecycle
     Only show lifecycle events.`))
-	cmd.Hidden = true
 
 	cmd.RunE = c.Run
 	cmd.Flags().BoolVar(&c.flagPretty, "pretty", false, i18n.G("Pretty rendering (short for --format=pretty)"))
@@ -67,7 +66,7 @@ func (c *cmdMonitor) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if !shared.StringInSlice(c.flagFormat, []string{"json", "pretty", "yaml"}) {
+	if !shared.ValueInSlice(c.flagFormat, []string{"json", "pretty", "yaml"}) {
 		return fmt.Errorf(i18n.G("Invalid format: %s"), c.flagFormat)
 	}
 

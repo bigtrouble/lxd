@@ -26,6 +26,7 @@ func nicValidationRules(requiredFields []string, optionalFields []string, instCo
 		"limits.ingress":                       validate.IsAny,
 		"limits.egress":                        validate.IsAny,
 		"limits.max":                           validate.IsAny,
+		"limits.priority":                      validate.Optional(validate.IsUint32),
 		"security.mac_filtering":               validate.IsAny,
 		"security.ipv4_filtering":              validate.IsAny,
 		"security.ipv6_filtering":              validate.IsAny,
@@ -117,7 +118,7 @@ func nicCheckNamesUnique(instConf instance.ConfigReader) error {
 			continue
 		}
 
-		if shared.StringInSlice(devConfig["name"], seenNICNames) {
+		if shared.ValueInSlice(devConfig["name"], seenNICNames) {
 			return fmt.Errorf("Duplicate NIC name detected %q", devConfig["name"])
 		}
 

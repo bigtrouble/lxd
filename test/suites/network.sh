@@ -4,6 +4,18 @@ test_network() {
 
   lxc init testimage nettest
 
+  # Test DNS resolution of instance names
+  lxc network create lxdt$$
+  lxc launch testimage 0abc -n lxdt$$
+  lxc launch testimage def0 -n lxdt$$
+  v4_addr="$(lxc network get lxdt$$ ipv4.address | cut -d/ -f1)"
+  sleep 2
+  dig @"${v4_addr}" 0abc.lxd
+  dig @"${v4_addr}" def0.lxd
+  lxc delete -f 0abc
+  lxc delete -f def0
+  lxc network delete lxdt$$
+
   # Standard bridge with random subnet and a bunch of options
   lxc network create lxdt$$
   lxc network set lxdt$$ dns.mode dynamic
@@ -83,6 +95,9 @@ test_network() {
   lxc network list-allocations | grep -e "${net_ipv4}" -e "${net_ipv6}"
   lxc network list-allocations | grep -e "/1.0/networks/lxdt$$" -e "/1.0/instances/nettest"
   lxc network list-allocations | grep -e "${v4_addr}" -e "${v6_addr}"
+  lxc network list-allocations localhost: | grep -e "${net_ipv4}" -e "${net_ipv6}"
+  lxc network list-allocations localhost: | grep -e "/1.0/networks/lxdt$$" -e "/1.0/instances/nettest"
+  lxc network list-allocations localhost: | grep -e "${v4_addr}" -e "${v6_addr}"
 
   lxc delete nettest -f
   lxc network delete lxdt$$

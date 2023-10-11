@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -228,8 +229,13 @@ func (c *Client) Stop() {
 
 // HandleEvent handles the event received from the internal event listener.
 func (c *Client) HandleEvent(event api.Event) {
-	if !shared.StringInSlice(event.Type, c.cfg.types) {
+	if !shared.ValueInSlice(event.Type, c.cfg.types) {
 		return
+	}
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "none"
 	}
 
 	entry := entry{
@@ -237,6 +243,7 @@ func (c *Client) HandleEvent(event api.Event) {
 			"app":      "lxd",
 			"type":     event.Type,
 			"location": event.Location,
+			"instance": hostname,
 		},
 		Entry: Entry{
 			Timestamp: event.Timestamp,
@@ -251,6 +258,14 @@ func (c *Client) HandleEvent(event api.Event) {
 		err := json.Unmarshal(event.Metadata, &lifecycleEvent)
 		if err != nil {
 			return
+		}
+
+		if lifecycleEvent.Name != "" {
+			entry.labels["name"] = lifecycleEvent.Name
+		}
+
+		if lifecycleEvent.Project != "" {
+			entry.labels["project"] = lifecycleEvent.Project
 		}
 
 		// Build map. These key-value pairs will either be added as labels, or be part of the
@@ -270,10 +285,11 @@ func (c *Client) HandleEvent(event api.Event) {
 
 		// Add key-value pairs as labels but don't override any labels.
 		for k, v := range context {
-			if shared.StringInSlice(k, c.cfg.labels) {
+			if shared.ValueInSlice(k, c.cfg.labels) {
 				_, ok := entry.labels[k]
 				if !ok {
-					entry.labels[k] = v
+					// Label names may not contain any hyphens.
+					entry.labels[strings.ReplaceAll(k, "-", "_")] = v
 					delete(context, k)
 				}
 			}
@@ -287,7 +303,7 @@ func (c *Client) HandleEvent(event api.Event) {
 		}
 
 		entry.Line = fmt.Sprintf("%s%s", messagePrefix, lifecycleEvent.Action)
-	} else if event.Type == api.EventTypeLogging {
+	} else if event.Type == api.EventTypeLogging || event.Type == api.EventTypeOVN {
 		logEvent := api.EventLogging{}
 
 		err := json.Unmarshal(event.Metadata, &logEvent)
@@ -321,7 +337,7 @@ func (c *Client) HandleEvent(event api.Event) {
 
 		// Add key-value pairs as labels but don't override any labels.
 		for k, v := range context {
-			if shared.StringInSlice(k, c.cfg.labels) {
+			if shared.ValueInSlice(k, c.cfg.labels) {
 				_, ok := entry.labels[k]
 				if !ok {
 					entry.labels[k] = v
@@ -330,14 +346,24 @@ func (c *Client) HandleEvent(event api.Event) {
 			}
 		}
 
-		messagePrefix := ""
+		keys := make([]string, 0, len(context))
 
-		// Add the remaining context as the message prefix.
-		for k, v := range context {
-			messagePrefix += fmt.Sprintf("%s=\"%s\" ", k, v)
+		for k := range context {
+			keys = append(keys, k)
 		}
 
-		entry.Line = fmt.Sprintf("%s%s", messagePrefix, logEvent.Message)
+		sort.Strings(keys)
+
+		var message strings.Builder
+
+		// Add the remaining context as the message prefix. The keys are sorted alphabetically.
+		for _, k := range keys {
+			message.WriteString(fmt.Sprintf("%s=%q ", k, context[k]))
+		}
+
+		message.WriteString(logEvent.Message)
+
+		entry.Line = message.String()
 	}
 
 	c.entries <- entry
@@ -349,7 +375,7 @@ func buildNestedContext(prefix string, m map[string]any) map[string]string {
 	for k, v := range m {
 		t := reflect.TypeOf(v)
 
-		if t.Kind() == reflect.Map {
+		if t != nil && t.Kind() == reflect.Map {
 			for k, v := range buildNestedContext(k, v.(map[string]any)) {
 				if prefix == "" {
 					labels[k] = v

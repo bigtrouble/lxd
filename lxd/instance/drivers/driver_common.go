@@ -38,13 +38,13 @@ import (
 )
 
 // ErrExecCommandNotFound indicates the command is not found.
-var ErrExecCommandNotFound = fmt.Errorf("Command not found")
+var ErrExecCommandNotFound = api.StatusErrorf(http.StatusBadRequest, "Command not found")
 
 // ErrExecCommandNotExecutable indicates the command is not executable.
-var ErrExecCommandNotExecutable = fmt.Errorf("Command not executable")
+var ErrExecCommandNotExecutable = api.StatusErrorf(http.StatusBadRequest, "Command not executable")
 
 // ErrInstanceIsStopped indicates that the instance is stopped.
-var ErrInstanceIsStopped error = fmt.Errorf("The instance is already stopped")
+var ErrInstanceIsStopped error = api.StatusErrorf(http.StatusBadRequest, "The instance is already stopped")
 
 // deviceManager is an interface that allows managing device lifecycle.
 type deviceManager interface {
@@ -810,7 +810,7 @@ func (d *common) getStartupSnapNameAndExpiry(inst instance.Instance) (string, *t
 	}
 
 	triggers := strings.Split(schedule, ", ")
-	if !shared.StringInSlice("@startup", triggers) {
+	if !shared.ValueInSlice("@startup", triggers) {
 		return "", nil, nil
 	}
 
@@ -1204,7 +1204,7 @@ func (d *common) needsNewInstanceID(changedConfig []string, oldExpandedDevices d
 		"user.user-data",
 		"user.network-config",
 	} {
-		if shared.StringInSlice(key, changedConfig) {
+		if shared.ValueInSlice(key, changedConfig) {
 			return true
 		}
 	}
@@ -1239,13 +1239,13 @@ func (d *common) needsNewInstanceID(changedConfig []string, oldExpandedDevices d
 	newNames := getNICNames(d.expandedDevices)
 
 	for _, entry := range oldNames {
-		if !shared.StringInSlice(entry, newNames) {
+		if !shared.ValueInSlice(entry, newNames) {
 			return true
 		}
 	}
 
 	for _, entry := range newNames {
-		if !shared.StringInSlice(entry, oldNames) {
+		if !shared.ValueInSlice(entry, oldNames) {
 			return true
 		}
 	}
@@ -1281,7 +1281,7 @@ func (d *common) deviceLoad(inst instance.Instance, deviceName string, rawConfig
 	var err error
 
 	// Create copy of config and load some fields from volatile if device is nic or infiniband.
-	if shared.StringInSlice(rawConfig["type"], []string{"nic", "infiniband"}) {
+	if shared.ValueInSlice(rawConfig["type"], []string{"nic", "infiniband"}) {
 		configCopy, err = inst.FillNetworkDevice(deviceName, rawConfig)
 		if err != nil {
 			return nil, err

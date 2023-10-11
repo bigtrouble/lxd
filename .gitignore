@@ -20,9 +20,9 @@ test/syscall/sysinfo/sysinfo
 
 # Sphinx
 doc/html/
-doc/config_options.txt
-doc/config_options.yaml
+doc/reference/manpages/**/*.md
 doc/.sphinx/deps/
+doc/.sphinx/.doctrees/
 doc/.sphinx/themes/
 doc/.sphinx/venv/
 doc/.sphinx/warnings.txt

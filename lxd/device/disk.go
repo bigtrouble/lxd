@@ -101,11 +101,6 @@ func (d *disk) CanMigrate() bool {
 	return false
 }
 
-// sourceIsDir returns true if the disks source config setting is a directory.
-func (d *disk) sourceIsDir() bool {
-	return shared.IsDir(d.config["source"])
-}
-
 // sourceIsCephFs returns true if the disks source config setting is a CephFS share.
 func (d *disk) sourceIsCephFs() bool {
 	return strings.HasPrefix(d.config["source"], "cephfs:")
@@ -118,7 +113,19 @@ func (d *disk) sourceIsCeph() bool {
 
 // CanHotPlug returns whether the device can be managed whilst the instance is running.
 func (d *disk) CanHotPlug() bool {
-	return !(d.sourceIsDir() || d.sourceIsCephFs()) || d.inst.Type() == instancetype.Container
+	// Containers support hot-plugging all disk types.
+	if d.inst.Type() == instancetype.Container {
+		return true
+	}
+
+	// A mount path indicates a filesystem disk being attached, which cannot be hot-plugged for VMs due to
+	// limitations with virtiofs.
+	if d.config["path"] != "" {
+		return false
+	}
+
+	// Block disks can be hot-plugged into VMs.
+	return true
 }
 
 // validateConfig checks the supplied config for correctness.
@@ -161,7 +168,7 @@ func (d *disk) validateConfig(instConf instance.ConfigReader) error {
 	// These come from https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt
 	propagationTypes := []string{"", "private", "shared", "slave", "unbindable", "rshared", "rslave", "runbindable", "rprivate"}
 	validatePropagation := func(input string) error {
-		if !shared.StringInSlice(d.config["bind"], propagationTypes) {
+		if !shared.ValueInSlice(d.config["bind"], propagationTypes) {
 			return fmt.Errorf("Invalid propagation value. Must be one of: %s", strings.Join(propagationTypes, ", "))
 		}
 
@@ -340,6 +347,42 @@ func (d *disk) validateConfig(instConf instance.ConfigReader) error {
 					}
 				} else if d.config["path"] == "" {
 					return fmt.Errorf("Custom filesystem volumes require a path to be defined")
+				}
+			}
+
+			// Extract initial configuration from the profile and validate them against appropriate
+			// storage driver. Currently initial configuration is only applicable to root disk devices.
+			initialConfig := make(map[string]string)
+			for k, v := range d.config {
+				prefix, newKey, found := strings.Cut(k, "initial.")
+				if found && prefix == "" {
+					initialConfig[newKey] = v
+				}
+			}
+
+			if len(initialConfig) > 0 {
+				if !shared.IsRootDiskDevice(d.config) {
+					return fmt.Errorf("Non-root disk device cannot contain initial.* configuration")
+				}
+
+				volumeType, err := storagePools.InstanceTypeToVolumeType(d.inst.Type())
+				if err != nil {
+					return err
+				}
+
+				// Create temporary volume definition.
+				vol := storageDrivers.NewVolume(
+					d.pool.Driver(),
+					d.pool.Name(),
+					volumeType,
+					storagePools.InstanceContentType(d.inst),
+					d.name,
+					initialConfig,
+					d.pool.Driver().Config())
+
+				err = d.pool.Driver().ValidateVolume(vol, true)
+				if err != nil {
+					return fmt.Errorf("Invalid initial device configuration: %v", err)
 				}
 			}
 		}
@@ -852,6 +895,10 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 			// directory sharing feature to mount the directory inside the VM, and as such we need to
 			// indicate to the VM the target path to mount to.
 			if shared.IsDir(mount.DevPath) || d.sourceIsCephFs() {
+				if d.config["path"] == "" {
+					return nil, fmt.Errorf(`Missing mount "path" setting`)
+				}
+
 				// Mount the source in the instance devices directory.
 				// This will ensure that if the exported directory configured as readonly that this
 				// takes effect event if using virtio-fs (which doesn't support read only mode) by
@@ -1829,14 +1876,14 @@ func (d *disk) getDiskLimits() (map[string]diskBlockLimit, error) {
 		for _, block := range blocks {
 			blockStr := ""
 
-			if shared.StringInSlice(block, validBlocks) {
+			if shared.ValueInSlice(block, validBlocks) {
 				// Straightforward entry (full block device)
 				blockStr = block
 			} else {
 				// Attempt to deal with a partition (guess its parent)
 				fields := strings.SplitN(block, ":", 2)
 				fields[1] = "0"
-				if shared.StringInSlice(fmt.Sprintf("%s:%s", fields[0], fields[1]), validBlocks) {
+				if shared.ValueInSlice(fmt.Sprintf("%s:%s", fields[0], fields[1]), validBlocks) {
 					blockStr = fmt.Sprintf("%s:%s", fields[0], fields[1])
 				}
 			}

@@ -36,7 +36,6 @@ func (c *cmdQuery) Command() *cobra.Command {
 	cmd.Example = cli.FormatSection("", i18n.G(
 		`lxc query -X DELETE --wait /1.0/instances/c1
     Delete local instance "c1".`))
-	cmd.Hidden = true
 
 	cmd.RunE = c.Run
 	cmd.Flags().BoolVar(&c.flagRespWait, "wait", false, i18n.G("Wait for the operation to complete"))
@@ -73,7 +72,7 @@ func (c *cmdQuery) Run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf(i18n.G("--project cannot be used with the query command"))
 	}
 
-	if !shared.StringInSlice(c.flagAction, []string{"GET", "PUT", "POST", "PATCH", "DELETE"}) {
+	if !shared.ValueInSlice(c.flagAction, []string{"GET", "PUT", "POST", "PATCH", "DELETE"}) {
 		return fmt.Errorf(i18n.G("Action %q isn't supported by this tool"), c.flagAction)
 	}
 

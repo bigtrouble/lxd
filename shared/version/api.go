@@ -381,6 +381,11 @@ var APIExtensions = []string{
 	"storage_api_remote_volume_snapshot_copy",
 	"zfs_delegate",
 	"operations_get_query_all_projects",
+	"metadata_configuration",
+	"syslog_socket",
+	"event_lifecycle_name_and_project",
+	"instances_nic_limits_priority",
+	"disk_initial_volume_configuration",
 }
 
 // APIExtensionsCount returns the number of available API extensions.

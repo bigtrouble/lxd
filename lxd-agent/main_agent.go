@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/canonical/lxd/lxd/instance/instancetype"
+	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/lxd/vsock"
 	"github.com/canonical/lxd/shared"
@@ -62,7 +63,7 @@ func (c *cmdAgent) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Sync the hostname.
-	if shared.PathExists("/proc/sys/kernel/hostname") && shared.StringInSlice("/etc/hostname", files) {
+	if shared.PathExists("/proc/sys/kernel/hostname") && shared.ValueInSlice("/etc/hostname", files) {
 		// Open the two files.
 		src, err := os.Open("/etc/hostname")
 		if err != nil {
@@ -89,7 +90,7 @@ func (c *cmdAgent) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run cloud-init.
-	if shared.PathExists("/etc/cloud") && shared.StringInSlice("/var/lib/cloud/seed/nocloud-net/meta-data", files) {
+	if shared.PathExists("/etc/cloud") && shared.ValueInSlice("/var/lib/cloud/seed/nocloud-net/meta-data", files) {
 		logger.Info("Seeding cloud-init")
 
 		cloudInitPath := "/run/cloud-init"
@@ -310,6 +311,9 @@ func (c *cmdAgent) mountHostShares() {
 				logger.Errorf("Failed to create mount target %q", mount.Target)
 				continue // Don't try to mount if mount point can't be created.
 			}
+		} else if filesystem.IsMountPoint(mount.Target) {
+			// Already mounted.
+			continue
 		}
 
 		if mount.FSType == "9p" {

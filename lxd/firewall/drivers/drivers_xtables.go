@@ -618,7 +618,7 @@ func (d Xtables) aclRuleCriteriaToArgs(networkName string, ipVersion uint, rule 
 	}
 
 	// Add protocol filters.
-	if shared.StringInSlice(rule.Protocol, []string{"tcp", "udp"}) {
+	if shared.ValueInSlice(rule.Protocol, []string{"tcp", "udp"}) {
 		args = append(args, "-p", rule.Protocol)
 
 		if rule.SourcePort != "" {
@@ -628,7 +628,7 @@ func (d Xtables) aclRuleCriteriaToArgs(networkName string, ipVersion uint, rule 
 		if rule.DestinationPort != "" {
 			args = append(args, d.aclRulePortToACLMatch("dports", shared.SplitNTrimSpace(rule.DestinationPort, ",", -1, false)...)...)
 		}
-	} else if shared.StringInSlice(rule.Protocol, []string{"icmp4", "icmp6"}) {
+	} else if shared.ValueInSlice(rule.Protocol, []string{"icmp4", "icmp6"}) {
 		var icmpIPVersion uint
 		var protoName string
 		var extName string
@@ -1287,7 +1287,7 @@ func (d Xtables) iptablesClear(ipVersion uint, comments []string, fromTables ...
 	}
 
 	for _, fromTable := range fromTables {
-		if tables != nil && !shared.StringInSlice(fromTable, tables) {
+		if tables != nil && !shared.ValueInSlice(fromTable, tables) {
 			// If we successfully opened the tables file, and the requested table is not present,
 			// then skip trying to get a list of rules from that table.
 			continue
@@ -1365,6 +1365,56 @@ func (d Xtables) InstanceClearRPFilter(projectName string, instanceName string, 
 
 	if len(errs) > 0 {
 		return fmt.Errorf("Failed to remove reverse path filter rules for %q: %v", deviceName, errs)
+	}
+
+	return nil
+}
+
+// InstanceSetupNetPrio activates setting of skb->priority for the specified instance device on the host interface.
+func (d Xtables) InstanceSetupNetPrio(projectName string, instanceName string, deviceName string, netPrio uint32) error {
+	comment := fmt.Sprintf("%s netprio", d.instanceDeviceIPTablesComment(projectName, instanceName, deviceName))
+	class := fmt.Sprintf("%x:%x", uint16(uint32(netPrio)>>16), uint16(uint32(netPrio)&0xFFFF))
+	args := []string{
+		"-i", deviceName,
+		"-j", "CLASSIFY",
+		"--set-class", class,
+	}
+
+	// IPv4 filter.
+	err := d.iptablesPrepend(4, comment, "mangle", "FORWARD", args...)
+	if err != nil {
+		return err
+	}
+
+	// IPv6 filter if IPv6 is enabled.
+	if shared.PathExists("/proc/sys/net/ipv6") {
+		err = d.iptablesPrepend(6, comment, "mangle", "FORWARD", args...)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// InstanceClearNetPrio removes setting of skb->priority for the specified instance device on the host interface.
+func (d Xtables) InstanceClearNetPrio(projectName string, instanceName string, deviceName string) error {
+	if deviceName == "" {
+		return fmt.Errorf("Failed clearing netprio rules for instance %q in project %q: device name is empty", projectName, instanceName)
+	}
+
+	comment := fmt.Sprintf("%s netprio", d.instanceDeviceIPTablesComment(projectName, instanceName, deviceName))
+	errs := []error{}
+
+	for _, ipVersion := range []uint{4, 6} {
+		err := d.iptablesClear(ipVersion, []string{comment}, "mangle")
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("Failed to remove netprio rules for %q: %v", deviceName, errs)
 	}
 
 	return nil

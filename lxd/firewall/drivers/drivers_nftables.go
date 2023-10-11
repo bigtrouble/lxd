@@ -184,7 +184,7 @@ func (d Nftables) nftParseRuleset() ([]nftGenericItem, error) {
 	return items, nil
 }
 
-// GetVersion returns the version of dnsmasq.
+// GetVersion returns the version of nftables.
 func (d Nftables) hostVersion() (*version.DottedVersion, error) {
 	output, err := shared.RunCommandCLocale("nft", "--version")
 	if err != nil {
@@ -372,11 +372,12 @@ func (d Nftables) NetworkClear(networkName string, _ bool, _ []uint) error {
 		"fwd", "pstrt", "in", "out", // Chains used for network operation rules.
 		"aclin", "aclout", "aclfwd", "acl", // Chains used by ACL rules.
 		"fwdprert", "fwdout", "fwdpstrt", // Chains used by Address Forward rules.
+		"egress", // Chains added for limits.priority option
 	}
 
 	// Remove chains created by network rules.
 	// Remove from ip and ip6 tables to ensure cleanup for instances started before we moved to inet table
-	err := d.removeChains([]string{"inet", "ip", "ip6"}, networkName, removeChains...)
+	err := d.removeChains([]string{"inet", "ip", "ip6", "netdev"}, networkName, removeChains...)
 	if err != nil {
 		return fmt.Errorf("Failed clearing nftables rules for network %q: %w", networkName, err)
 	}
@@ -613,7 +614,7 @@ func (d Nftables) removeChains(families []string, chainSuffix string, chains ...
 	foundChains := make(map[string]nftGenericItem)
 	for _, family := range families {
 		for _, item := range ruleset {
-			if item.ItemType == "chain" && item.Family == family && item.Table == nftablesNamespace && shared.StringInSlice(item.Name, fullChains) {
+			if item.ItemType == "chain" && item.Family == family && item.Table == nftablesNamespace && shared.ValueInSlice(item.Name, fullChains) {
 				foundChains[item.Name] = item
 			}
 		}
@@ -662,6 +663,43 @@ func (d Nftables) InstanceClearRPFilter(projectName string, instanceName string,
 	err := d.removeChains([]string{"inet", "ip", "ip6"}, deviceLabel, "prert")
 	if err != nil {
 		return fmt.Errorf("Failed clearing reverse path filter rules for instance device %q: %w", deviceLabel, err)
+	}
+
+	return nil
+}
+
+// InstanceSetupNetPrio activates setting of skb->priority for the specified instance device on the host interface.
+func (d Nftables) InstanceSetupNetPrio(projectName string, instanceName string, deviceName string, netPrio uint32) error {
+	deviceLabel := d.instanceDeviceLabel(projectName, instanceName, deviceName)
+	tplFields := map[string]any{
+		"namespace":      nftablesNamespace,
+		"family":         "netdev",
+		"chainSeparator": nftablesChainSeparator,
+		"deviceLabel":    deviceLabel,
+		"deviceName":     deviceName,
+		"netPrio":        netPrio,
+	}
+
+	err := d.applyNftConfig(nftablesInstanceNetPrio, tplFields)
+	if err != nil {
+		return fmt.Errorf("Failed adding netprio rules for instance device %q: %w", deviceLabel, err)
+	}
+
+	return nil
+}
+
+// InstanceClearNetPrio removes setting of skb->priority for the specified instance device on the host interface.
+func (d Nftables) InstanceClearNetPrio(projectName string, instanceName string, deviceName string) error {
+	if deviceName == "" {
+		return fmt.Errorf("Failed clearing netprio rules for instance %q in project %q: device name is empty", projectName, instanceName)
+	}
+
+	deviceLabel := d.instanceDeviceLabel(projectName, instanceName, deviceName)
+	chainLabel := fmt.Sprintf("netprio%s%s", nftablesChainSeparator, deviceLabel)
+
+	err := d.removeChains([]string{"netdev"}, chainLabel, "egress")
+	if err != nil {
+		return fmt.Errorf("Failed clearing netprio rules for instance device %q: %w", deviceLabel, err)
 	}
 
 	return nil
@@ -769,7 +807,7 @@ func (d Nftables) aclRuleCriteriaToRules(networkName string, ipVersion uint, rul
 	}
 
 	// Add protocol filters.
-	if shared.StringInSlice(rule.Protocol, []string{"tcp", "udp"}) {
+	if shared.ValueInSlice(rule.Protocol, []string{"tcp", "udp"}) {
 		args = append(args, "meta", "l4proto", rule.Protocol)
 
 		if rule.SourcePort != "" {
@@ -779,7 +817,7 @@ func (d Nftables) aclRuleCriteriaToRules(networkName string, ipVersion uint, rul
 		if rule.DestinationPort != "" {
 			args = append(args, d.aclRulePortToACLMatch("dport", shared.SplitNTrimSpace(rule.DestinationPort, ",", -1, false)...)...)
 		}
-	} else if shared.StringInSlice(rule.Protocol, []string{"icmp4", "icmp6"}) {
+	} else if shared.ValueInSlice(rule.Protocol, []string{"icmp4", "icmp6"}) {
 		var icmpIPVersion uint
 		var protoName string
 
