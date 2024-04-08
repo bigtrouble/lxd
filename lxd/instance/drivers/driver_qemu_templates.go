@@ -177,17 +177,31 @@ func qemuSerial(opts *qemuSerialOpts) []cfgSection {
 		comment: "Virtual serial bus",
 		entries: qemuDeviceEntries(&entriesOpts),
 	}, {
+		// Ring buffer used by the lxd agent to report (write) its status to. LXD server will read
+		// its content via QMP using "ringbuf-read" command.
 		name:    fmt.Sprintf(`chardev "%s"`, opts.charDevName),
 		comment: "LXD serial identifier",
 		entries: []cfgEntry{
 			{key: "backend", value: "ringbuf"},
 			{key: "size", value: fmt.Sprintf("%dB", opts.ringbufSizeBytes)}},
 	}, {
+		// QEMU serial device connected to the above ring buffer.
 		name: `device "qemu_serial"`,
 		entries: []cfgEntry{
 			{key: "driver", value: "virtserialport"},
-			{key: "name", value: "org.linuxcontainers.lxd"},
+			{key: "name", value: "com.canonical.lxd"},
 			{key: "chardev", value: opts.charDevName},
+			{key: "bus", value: "dev-qemu_serial.0"},
+		},
+	}, {
+		// Legacy QEMU serial device, not connected to any ring buffer. Its purpose is to
+		// create a symlink in /dev/virtio-ports/, triggering a udev rule to start the lxd-agent.
+		// This is necessary for backward compatibility with virtual machines lacking the
+		// updated lxd-agent-loader package, which includes updated udev rules and a systemd unit.
+		name: `device "qemu_serial_legacy"`,
+		entries: []cfgEntry{
+			{key: "driver", value: "virtserialport"},
+			{key: "name", value: "org.linuxcontainers.lxd"},
 			{key: "bus", value: "dev-qemu_serial.0"},
 		},
 	}, {
@@ -411,6 +425,7 @@ type qemuNumaEntry struct {
 type qemuCPUOpts struct {
 	architecture        string
 	cpuCount            int
+	cpuRequested        int
 	cpuSockets          int
 	cpuCores            int
 	cpuThreads          int
@@ -470,8 +485,18 @@ func qemuCPU(opts *qemuCPUOpts, pinning bool) []cfgSection {
 			return nil
 		}
 
+		// Cap the max number of CPUs to 64 unless directly assigned more.
+		max := 64
+		if int(cpu.Total) < max {
+			max = int(cpu.Total)
+		} else if opts.cpuRequested > max {
+			max = opts.cpuRequested
+		} else if opts.cpuCount > max {
+			max = opts.cpuCount
+		}
+
 		entries = append(entries, cfgEntry{
-			key: "maxcpus", value: fmt.Sprintf("%d", cpu.Total),
+			key: "maxcpus", value: fmt.Sprintf("%d", max),
 		})
 	}
 

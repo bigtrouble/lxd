@@ -544,7 +544,7 @@ func (c *cmdNetworkLoadBalancerEdit) helpTemplate() string {
 ### config:
 ###   target_address: 198.51.100.2
 ### description: test desc
-### port:
+### ports:
 ### - description: port forward
 ###   protocol: tcp
 ###   listen_port: 80,81,8080-8090
@@ -603,7 +603,7 @@ func (c *cmdNetworkLoadBalancerEdit) Run(cmd *cobra.Command, args []string) erro
 
 		newData.Normalise()
 
-		return client.UpdateNetworkLoadBalancer(resource.name, args[1], newData.NetworkLoadBalancerPut, "")
+		return client.UpdateNetworkLoadBalancer(resource.name, args[1], newData.Writable(), "")
 	}
 
 	// Get the current config.

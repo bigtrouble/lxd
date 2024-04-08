@@ -13,10 +13,10 @@ import (
 
 	"github.com/canonical/lxd/lxd/cgroup"
 	"github.com/canonical/lxd/lxd/db/cluster"
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
-	"github.com/canonical/lxd/shared/idmap"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
 	"github.com/canonical/lxd/shared/version"
@@ -81,7 +81,6 @@ type OS struct {
 	PidFdSetns              bool
 	SeccompListener         bool
 	SeccompListenerContinue bool
-	Shiftfs                 bool
 	UeventInjection         bool
 	VFS3Fscaps              bool
 

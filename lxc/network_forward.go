@@ -543,7 +543,7 @@ func (c *cmdNetworkForwardEdit) helpTemplate() string {
 ### config:
 ###   target_address: 198.51.100.2
 ### description: test desc
-### port:
+### ports:
 ### - description: port forward
 ###   protocol: tcp
 ###   listen_port: 80,81,8080-8090
@@ -601,7 +601,7 @@ func (c *cmdNetworkForwardEdit) Run(cmd *cobra.Command, args []string) error {
 
 		newData.Normalise()
 
-		return client.UpdateNetworkForward(resource.name, args[1], newData.NetworkForwardPut, "")
+		return client.UpdateNetworkForward(resource.name, args[1], newData.Writable(), "")
 	}
 
 	// Get the current config.

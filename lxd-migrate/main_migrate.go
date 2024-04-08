@@ -18,11 +18,11 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/canonical/lxd/client"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	cli "github.com/canonical/lxd/shared/cmd"
 	"github.com/canonical/lxd/shared/osarch"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -33,7 +33,7 @@ type cmdMigrate struct {
 	flagRsyncArgs string
 }
 
-func (c *cmdMigrate) Command() *cobra.Command {
+func (c *cmdMigrate) command() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Use = "lxd-migrate"
 	cmd.Short = "Physical to instance migration tool"
@@ -49,7 +49,7 @@ func (c *cmdMigrate) Command() *cobra.Command {
 
   The same set of options as ` + "`lxc launch`" + ` are also supported.
 `
-	cmd.RunE = c.Run
+	cmd.RunE = c.run
 	cmd.Flags().StringVar(&c.flagRsyncArgs, "rsync-args", "", "Extra arguments to pass to rsync"+"``")
 
 	return cmd
@@ -62,7 +62,7 @@ type cmdMigrateData struct {
 	Project      string
 }
 
-func (c *cmdMigrateData) Render() string {
+func (c *cmdMigrateData) render() string {
 	data := struct {
 		Name        string            `yaml:"Name"`
 		Project     string            `yaml:"Project"`
@@ -160,8 +160,7 @@ func (c *cmdMigrate) askServer() (lxd.InstanceServer, string, error) {
 	type AuthMethod int
 
 	const (
-		authMethodCandid AuthMethod = iota
-		authMethodTLSCertificate
+		authMethodTLSCertificate AuthMethod = iota
 		authMethodTLSTemporaryCertificate
 		authMethodTLSCertificateToken
 	)
@@ -172,13 +171,7 @@ func (c *cmdMigrate) askServer() (lxd.InstanceServer, string, error) {
 
 	i := 1
 
-	if shared.ValueInSlice("candid", apiServer.AuthMethods) {
-		fmt.Printf("%d) Candid/RBAC based authentication\n", i)
-		availableAuthMethods = append(availableAuthMethods, authMethodCandid)
-		i++
-	}
-
-	if shared.ValueInSlice("tls", apiServer.AuthMethods) {
+	if shared.ValueInSlice(api.AuthenticationMethodTLS, apiServer.AuthMethods) {
 		fmt.Printf("%d) Use a certificate token\n", i)
 		availableAuthMethods = append(availableAuthMethods, authMethodTLSCertificateToken)
 		i++
@@ -189,7 +182,7 @@ func (c *cmdMigrate) askServer() (lxd.InstanceServer, string, error) {
 		availableAuthMethods = append(availableAuthMethods, authMethodTLSTemporaryCertificate)
 	}
 
-	if len(apiServer.AuthMethods) > 1 || shared.ValueInSlice("tls", apiServer.AuthMethods) {
+	if len(apiServer.AuthMethods) > 1 || shared.ValueInSlice(api.AuthenticationMethodTLS, apiServer.AuthMethods) {
 		authMethodInt, err := c.global.asker.AskInt("Please pick an authentication mechanism above: ", 1, int64(i), "", nil)
 		if err != nil {
 			return nil, "", err
@@ -241,16 +234,14 @@ func (c *cmdMigrate) askServer() (lxd.InstanceServer, string, error) {
 	var authType string
 
 	switch authMethod {
-	case authMethodCandid:
-		authType = "candid"
 	case authMethodTLSCertificate, authMethodTLSTemporaryCertificate, authMethodTLSCertificateToken:
-		authType = "tls"
+		authType = api.AuthenticationMethodTLS
 	}
 
 	return c.connectTarget(serverURL, certPath, keyPath, authType, token)
 }
 
-func (c *cmdMigrate) RunInteractive(server lxd.InstanceServer) (cmdMigrateData, error) {
+func (c *cmdMigrate) runInteractive(server lxd.InstanceServer) (cmdMigrateData, error) {
 	var err error
 
 	config := cmdMigrateData{}
@@ -395,7 +386,7 @@ func (c *cmdMigrate) RunInteractive(server lxd.InstanceServer) (cmdMigrateData, 
 	for {
 		fmt.Println("\nInstance to be created:")
 
-		scanner := bufio.NewScanner(strings.NewReader(config.Render()))
+		scanner := bufio.NewScanner(strings.NewReader(config.render()))
 		for scanner.Scan() {
 			fmt.Printf("  %s\n", scanner.Text())
 		}
@@ -434,7 +425,7 @@ Additional overrides can be applied at this stage:
 	}
 }
 
-func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
+func (c *cmdMigrate) run(cmd *cobra.Command, args []string) error {
 	// Quick checks.
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("This tool must be run as root")
@@ -463,14 +454,18 @@ func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
 		}
 
 		cancel()
-		os.Exit(1)
+
+		// The following nolint directive ignores the "deep-exit" rule of the revive linter.
+		// We should be exiting cleanly by passing the above context into each invoked method and checking for
+		// cancellation. Unfortunately our client methods do not accept a context argument.
+		os.Exit(1) //nolint:revive
 	}()
 
 	if clientFingerprint != "" {
 		defer func() { _ = server.DeleteCertificate(clientFingerprint) }()
 	}
 
-	config, err := c.RunInteractive(server)
+	config, err := c.runInteractive(server)
 	if err != nil {
 		return err
 	}

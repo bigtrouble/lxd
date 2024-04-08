@@ -11,13 +11,13 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
@@ -25,6 +25,7 @@ import (
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 )
 
@@ -65,7 +66,7 @@ func waitForOperations(ctx context.Context, cluster *db.Cluster, consoleShutdown
 				logger.Error("Failed cleaning up operations")
 			}
 
-			return nil
+			return nil //nolint:revive // False positive: raises "return in a defer function has no effect".
 		})
 	}()
 
@@ -252,13 +253,49 @@ func operationDelete(d *Daemon, r *http.Request) response.Response {
 	op, err := operations.OperationGetInternal(id)
 	if err == nil {
 		projectName := op.Project()
-		if op.Permission() != "" {
-			if projectName == "" {
-				projectName = project.Default
+		if projectName == "" {
+			projectName = api.ProjectDefaultName
+		}
+
+		// Separate resources by entity type. If there are multiple entries of a particular entity type we can reduce
+		// the number of calls to the authorizer.
+		objectType, entitlement := op.Permission()
+		urlsByEntityType := make(map[entity.Type][]api.URL)
+		if objectType != "" {
+			for _, v := range op.Resources() {
+				for _, u := range v {
+					entityType, _, _, _, err := entity.ParseURL(u.URL)
+					if err != nil {
+						return response.InternalError(fmt.Errorf("Failed to parse operation resource entity URL: %w", err))
+					}
+
+					urlsByEntityType[entityType] = append(urlsByEntityType[entityType], u)
+				}
+			}
+		}
+
+		for entityType, urls := range urlsByEntityType {
+			// If only one entry of this type, check directly.
+			if len(urls) == 1 {
+				err := s.Authorizer.CheckPermission(r.Context(), r, &urls[0], entitlement)
+				if err != nil {
+					return response.SmartError(err)
+				}
+
+				continue
 			}
 
-			if !s.Authorizer.UserHasPermission(r, projectName, op.Permission()) {
-				return response.Forbidden(nil)
+			// Otherwise get a permission checker for the entity type.
+			hasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, entitlement, entityType)
+			if err != nil {
+				return response.SmartError(err)
+			}
+
+			// Check each URL.
+			for _, u := range urls {
+				if !hasPermission(&u) {
+					return response.Forbidden(nil)
+				}
 			}
 		}
 
@@ -469,8 +506,8 @@ func operationCancel(s *state.State, r *http.Request, projectName string, op *ap
 func operationsGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName := queryParam(r, "project")
-	allProjects := shared.IsTrue(queryParam(r, "all-projects"))
+	projectName := request.QueryParam(r, "project")
+	allProjects := shared.IsTrue(request.QueryParam(r, "all-projects"))
 	recursion := util.IsRecursionRequest(r)
 
 	if allProjects && projectName != "" {
@@ -478,7 +515,12 @@ func operationsGet(d *Daemon, r *http.Request) response.Response {
 			api.StatusErrorf(http.StatusBadRequest, "Cannot specify a project when requesting all projects"),
 		)
 	} else if !allProjects && projectName == "" {
-		projectName = project.Default
+		projectName = api.ProjectDefaultName
+	}
+
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanViewOperations, entity.TypeProject)
+	if err != nil {
+		return response.InternalError(fmt.Errorf("Failed to get operation permission checker: %w", err))
 	}
 
 	localOperationURLs := func() (shared.Jmap, error) {
@@ -490,6 +532,10 @@ func operationsGet(d *Daemon, r *http.Request) response.Response {
 
 		for _, v := range localOps {
 			if !allProjects && v.Project() != "" && v.Project() != projectName {
+				continue
+			}
+
+			if !userHasPermission(entity.ProjectURL(v.Project())) {
 				continue
 			}
 
@@ -514,6 +560,10 @@ func operationsGet(d *Daemon, r *http.Request) response.Response {
 
 		for _, v := range localOps {
 			if !allProjects && v.Project() != "" && v.Project() != projectName {
+				continue
+			}
+
+			if !userHasPermission(entity.ProjectURL(v.Project())) {
 				continue
 			}
 
@@ -558,7 +608,6 @@ func operationsGet(d *Daemon, r *http.Request) response.Response {
 
 	// Start with local operations.
 	var md shared.Jmap
-	var err error
 
 	if recursion {
 		md, err = localOperations()
@@ -572,14 +621,8 @@ func operationsGet(d *Daemon, r *http.Request) response.Response {
 		}
 	}
 
-	// Check if clustered.
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.InternalError(err)
-	}
-
 	// If not clustered, then just return local operations.
-	if !clustered {
+	if !s.ServerClustered {
 		return response.SyncResponse(true, md)
 	}
 
@@ -701,21 +744,17 @@ func operationsGetByType(s *state.State, r *http.Request, projectName string, op
 		ops = append(ops, apiOp)
 	}
 
-	// Check if clustered.
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return nil, err
-	}
-
 	// Return just local operations if not clustered.
-	if !clustered {
+	if !s.ServerClustered {
 		return ops, nil
 	}
 
 	// Get all operations of the specified type in project.
 	var members []db.NodeInfo
 	memberOps := make(map[string]map[string]dbCluster.Operation)
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
 		members, err = tx.GetNodes(ctx)
 		if err != nil {
 			return fmt.Errorf("Failed getting cluster members: %w", err)
@@ -897,7 +936,11 @@ func operationWaitGet(d *Daemon, r *http.Request) response.Response {
 
 	secret := r.FormValue("secret")
 
-	trusted, _, _, _ := d.Authenticate(nil, r)
+	trusted, err := request.GetCtxValue[bool](r.Context(), request.CtxTrusted)
+	if err != nil {
+		return response.SmartError(fmt.Errorf("Failed to get authentication status: %w", err))
+	}
+
 	if !trusted && secret == "" {
 		return response.Forbidden(nil)
 	}
@@ -924,19 +967,37 @@ func operationWaitGet(d *Daemon, r *http.Request) response.Response {
 			ctx, cancel = context.WithCancel(r.Context())
 		}
 
-		defer cancel()
+		waitResponse := func(w http.ResponseWriter) error {
+			defer cancel()
 
-		err = op.Wait(ctx)
-		if err != nil {
-			return response.SmartError(err)
+			// Write header to avoid client side timeouts.
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusOK)
+			f, ok := w.(http.Flusher)
+			if ok {
+				f.Flush()
+			}
+
+			// Wait for the operation.
+			err = op.Wait(ctx)
+			if err != nil {
+				_ = response.SmartError(err).Render(w)
+				return nil
+			}
+
+			_, body, err := op.Render()
+			if err != nil {
+				_ = response.SmartError(err).Render(w)
+				return nil
+			}
+
+			_ = response.SyncResponse(true, body).Render(w)
+			return nil
 		}
 
-		_, body, err := op.Render()
-		if err != nil {
-			return response.SmartError(err)
-		}
-
-		return response.SyncResponse(true, body)
+		return response.ManualResponse(waitResponse)
 	}
 
 	// Then check if the query is from an operation on another node, and, if so, forward it
@@ -978,6 +1039,7 @@ type operationWebSocket struct {
 	op  *operations.Operation
 }
 
+// Render implements response.Response for operationWebSocket.
 func (r *operationWebSocket) Render(w http.ResponseWriter) error {
 	chanErr, err := r.op.Connect(r.req, w)
 	if err != nil {
@@ -988,6 +1050,7 @@ func (r *operationWebSocket) Render(w http.ResponseWriter) error {
 	return err
 }
 
+// String implements fmt.Stringer for operationWebSocket.
 func (r *operationWebSocket) String() string {
 	_, md, err := r.op.Render()
 	if err != nil {

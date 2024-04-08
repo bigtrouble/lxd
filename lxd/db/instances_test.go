@@ -14,7 +14,6 @@ import (
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
-	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/shared/api"
 )
 
@@ -265,13 +264,16 @@ func TestInstanceList(t *testing.T) {
 	require.NoError(t, err)
 
 	var instances []db.InstanceArgs
-	err = c.InstanceList(context.TODO(), func(dbInst db.InstanceArgs, p api.Project) error {
-		dbInst.Config = db.ExpandInstanceConfig(dbInst.Config, dbInst.Profiles)
-		dbInst.Devices = db.ExpandInstanceDevices(dbInst.Devices, dbInst.Profiles)
 
-		instances = append(instances, dbInst)
+	err = c.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(dbInst db.InstanceArgs, p api.Project) error {
+			dbInst.Config = instancetype.ExpandInstanceConfig(nil, dbInst.Config, dbInst.Profiles)
+			dbInst.Devices = instancetype.ExpandInstanceDevices(dbInst.Devices, dbInst.Profiles)
 
-		return nil
+			instances = append(instances, dbInst)
+
+			return nil
+		})
 	})
 	require.NoError(t, err)
 
@@ -429,9 +431,9 @@ func TestGetInstancesByMemberAddress(t *testing.T) {
 	assert.Equal(
 		t,
 		map[string][]db.Instance{
-			"":            {{ID: 2, Project: project.Default, Name: "c2", Location: "none"}},
-			"1.2.3.4:666": {{ID: 1, Project: project.Default, Name: "c1", Location: "node2"}, {ID: 4, Project: project.Default, Name: "c4", Location: "node2"}},
-			"0.0.0.0":     {{ID: 3, Project: project.Default, Name: "c3", Location: "node3"}},
+			"":            {{ID: 2, Project: api.ProjectDefaultName, Name: "c2", Location: "none"}},
+			"1.2.3.4:666": {{ID: 1, Project: api.ProjectDefaultName, Name: "c1", Location: "node2"}, {ID: 4, Project: api.ProjectDefaultName, Name: "c4", Location: "node2"}},
+			"0.0.0.0":     {{ID: 3, Project: api.ProjectDefaultName, Name: "c3", Location: "node3"}},
 		}, result)
 }
 
@@ -439,12 +441,17 @@ func TestGetInstancePool(t *testing.T) {
 	dbCluster, cleanup := db.NewTestCluster(t)
 	defer cleanup()
 
-	poolID, err := dbCluster.CreateStoragePool("default", "", "dir", nil)
-	require.NoError(t, err)
-	_, err = dbCluster.CreateStoragePoolVolume("default", "c1", "", db.StoragePoolVolumeTypeContainer, poolID, nil, db.StoragePoolVolumeContentTypeFS, time.Now())
-	require.NoError(t, err)
+	err := dbCluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		poolID, err := tx.CreateStoragePool(ctx, "default", "", "dir", nil)
+		if err != nil {
+			return err
+		}
 
-	err = dbCluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_, err = tx.CreateStoragePoolVolume(ctx, "default", "c1", "", cluster.StoragePoolVolumeTypeContainer, poolID, nil, cluster.StoragePoolVolumeContentTypeFS, time.Now())
+		if err != nil {
+			return err
+		}
+
 		container := cluster.Instance{
 			Project: "default",
 			Name:    "c1",
@@ -465,13 +472,20 @@ func TestGetInstancePool(t *testing.T) {
 				},
 			},
 		})
-		return err
+		if err != nil {
+			return err
+		}
+
+		poolName, err := tx.GetInstancePool(ctx, "default", "c1")
+		if err != nil {
+			return err
+		}
+
+		assert.Equal(t, "default", poolName)
+
+		return nil
 	})
 	require.NoError(t, err)
-
-	poolName, err := dbCluster.GetInstancePool("default", "c1")
-	require.NoError(t, err)
-	assert.Equal(t, "default", poolName)
 }
 
 // All containers on a node are loaded in bulk.

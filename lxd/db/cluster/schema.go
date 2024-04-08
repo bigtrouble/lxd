@@ -6,21 +6,28 @@ package cluster
 // modify the database schema, please add a new schema update to update.go
 // and the run 'make update-schema'.
 const freshSchema = `
-CREATE TABLE certificates (
+CREATE TABLE auth_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    type INTEGER NOT NULL,
     name TEXT NOT NULL,
-    certificate TEXT NOT NULL,
-    restricted INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (fingerprint)
+    description TEXT NOT NULL,
+    UNIQUE (name)
 );
-CREATE TABLE "certificates_projects" (
-	certificate_id INTEGER NOT NULL,
-	project_id INTEGER NOT NULL,
-	FOREIGN KEY (certificate_id) REFERENCES certificates (id) ON DELETE CASCADE,
-	FOREIGN KEY (project_id) REFERENCES "projects" (id) ON DELETE CASCADE,
-	UNIQUE (certificate_id, project_id)
+CREATE TABLE auth_groups_identity_provider_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    identity_provider_group_id INTEGER NOT NULL,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    FOREIGN KEY (identity_provider_group_id) REFERENCES identity_provider_groups (id) ON DELETE CASCADE,
+    UNIQUE (auth_group_id, identity_provider_group_id)
+);
+CREATE TABLE auth_groups_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    entity_type INTEGER NOT NULL,
+    entity_id INTEGER NOT NULL,
+    entitlement TEXT NOT NULL,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    UNIQUE (auth_group_id, entity_type, entitlement, entity_id)
 );
 CREATE TABLE "cluster_groups" (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -33,6 +40,40 @@ CREATE TABLE config (
     key TEXT NOT NULL,
     value TEXT,
     UNIQUE (key)
+);
+CREATE TABLE identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_method INTEGER NOT NULL,
+    type INTEGER NOT NULL,
+    identifier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    first_seen_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z",
+    last_seen_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z",
+    updated_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z",
+    UNIQUE (auth_method, identifier),
+    UNIQUE (type, identifier)
+);
+CREATE TABLE identities_auth_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    identity_id INTEGER NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    FOREIGN KEY (identity_id) REFERENCES identities (id) ON DELETE CASCADE,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    UNIQUE (identity_id, auth_group_id)
+);
+CREATE TABLE identities_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    identity_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    FOREIGN KEY (identity_id) REFERENCES identities (id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    UNIQUE (identity_id, project_id)
+);
+CREATE TABLE identity_provider_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT NOT NULL,
+    UNIQUE (name)
 );
 CREATE TABLE "images" (
     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -621,5 +662,5 @@ CREATE TABLE "warnings" (
 );
 CREATE UNIQUE INDEX warnings_unique_node_id_project_id_entity_type_code_entity_id_type_code ON warnings(IFNULL(node_id, -1), IFNULL(project_id, -1), entity_type_code, entity_id, type_code);
 
-INSERT INTO schema (version, updated_at) VALUES (69, strftime("%s"))
+INSERT INTO schema (version, updated_at) VALUES (73, strftime("%s"))
 `

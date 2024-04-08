@@ -2,18 +2,17 @@ package apparmor
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/sys"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 var rsyncProfileTpl = template.Must(template.New("rsyncProfile").Parse(`#include <tunables/global>
@@ -73,6 +72,7 @@ profile "{{ .name }}" flags=(attach_disconnected,mediate_deleted) {
 `))
 
 // RsyncWrapper is used as a RunWrapper in the rsync package.
+// It returns a cleanup function that deletes the AppArmor profile that the command is running in.
 func RsyncWrapper(sysOS *sys.OS, cmd *exec.Cmd, sourcePath string, dstPath string) (func(), error) {
 	if !sysOS.AppArmorAvailable {
 		return func() {}, nil
@@ -131,7 +131,7 @@ func rsyncProfileLoad(sysOS *sys.OS, sourcePath string, dstPath string) (string,
 	defer revert.Fail()
 
 	// Generate a temporary profile name.
-	name := profileName("rsync", uuid.New())
+	name := profileName("rsync", uuid.New().String())
 	profilePath := filepath.Join(aaPath, "profiles", name)
 
 	// Generate the profile
@@ -141,7 +141,7 @@ func rsyncProfileLoad(sysOS *sys.OS, sourcePath string, dstPath string) (string,
 	}
 
 	// Write it to disk.
-	err = ioutil.WriteFile(profilePath, []byte(content), 0600)
+	err = os.WriteFile(profilePath, []byte(content), 0600)
 	if err != nil {
 		return "", err
 	}

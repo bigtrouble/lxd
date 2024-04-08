@@ -3,6 +3,7 @@ package cluster_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/query"
+	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/osarch"
 )
 
@@ -515,10 +518,10 @@ INSERT INTO instances VALUES (1, 1, 'eoan', 2, 0, 0, ?, 0, ?, NULL, 1, ?)
 		require.NoError(t, err)
 
 		// Insert an instance snapshot.
-		expiry_date := time.Date(2019, 8, 14, 11, 9, 0, 0, time.UTC)
+		expiryDate := time.Date(2019, 8, 14, 11, 9, 0, 0, time.UTC)
 		_, err = db.Exec(`
 INSERT INTO instances VALUES (2, 1, 'eoan/snap', 2, 1, 0, ?, 0, ?, 'Eoan Ermine Snapshot', 1, ?)
-`, time.Now(), time.Now(), expiry_date)
+`, time.Now(), time.Now(), expiryDate)
 		require.NoError(t, err)
 		_, err = db.Exec("INSERT INTO instances_config VALUES (2, 2, 'key', 'value1')")
 		require.NoError(t, err)
@@ -762,4 +765,85 @@ func TestUpdateFromV34(t *testing.T) {
 	require.NoError(t, row.Scan(&id, &nodeID))
 	assert.Equal(t, id, 2)
 	assert.Equal(t, nodeID, nil)
+}
+
+func TestUpdateFromV69(t *testing.T) {
+	c1 := string(shared.TestingKeyPair().PublicKey())
+	c2 := string(shared.TestingAltKeyPair().PublicKey())
+
+	schema := cluster.Schema()
+	db, err := schema.ExerciseUpdate(70, func(db *sql.DB) {
+		_, err := db.Exec(`
+INSERT INTO certificates (fingerprint, type, name, certificate, restricted) VALUES ('eeef45f0570ce713864c86ec60c8d88f60b4844d3a8849b262c77cb18e88394d', 1, 'restricted-client', ?, 1);
+INSERT INTO certificates (fingerprint, type, name, certificate, restricted) VALUES ('86ec60c8d88f60b4844d3a8849b262c77cb18e88394deeef45f0570ce713864c', 1, 'unrestricted-client', ?, 0);
+INSERT INTO certificates (fingerprint, type, name, certificate, restricted) VALUES ('49b262c77cb18e88394d8e6ec60c8d8eef45f0570ce713864c8f60b4844d3a88', 2, 'server', ?, 0);
+INSERT INTO certificates (fingerprint, type, name, certificate, restricted) VALUES ('60c8d8eef45f0570ce713864c8f60b4844d3a8849b262c77cb18e88394d8e6ec', 3, 'metrics', ?, 1);
+INSERT INTO certificates (fingerprint, type, name, certificate, restricted) VALUES ('47c88da8fd0cb9a8d44768a445e6c27aee44e078ce74cbaec0726de427bac056', 3, 'metrics', ?, 0);
+INSERT INTO projects (name, description) VALUES ('p1', '');
+INSERT INTO projects (name, description) VALUES ('p2', '');
+INSERT INTO projects (name, description) VALUES ('p3', '');
+INSERT INTO certificates_projects (certificate_id, project_id) VALUES (1, 2);
+INSERT INTO certificates_projects (certificate_id, project_id) VALUES (1, 3);
+INSERT INTO certificates_projects (certificate_id, project_id) VALUES (1, 4);
+`, c1, c2, c1, c2, c2)
+		require.NoError(t, err)
+	})
+	require.NoError(t, err)
+
+	getTLSIdentityByFingerprint := func(fingerprint string) cluster.Identity {
+		identity := cluster.Identity{}
+		row := db.QueryRow(`SELECT id, auth_method, type, identifier, name, metadata FROM identities WHERE auth_method = ? AND identifier = ?`, cluster.AuthMethod(api.AuthenticationMethodTLS), fingerprint)
+		require.NoError(t, row.Err())
+		err = row.Scan(&identity.ID, &identity.AuthMethod, &identity.Type, &identity.Identifier, &identity.Name, &identity.Metadata)
+		require.NoError(t, row.Err())
+		return identity
+	}
+
+	identity := getTLSIdentityByFingerprint("eeef45f0570ce713864c86ec60c8d88f60b4844d3a8849b262c77cb18e88394d")
+	assert.Equal(t, api.IdentityTypeCertificateClientRestricted, string(identity.Type))
+	assert.Equal(t, "restricted-client", identity.Name)
+	var metadata cluster.CertificateMetadata
+	err = json.Unmarshal([]byte(identity.Metadata), &metadata)
+	require.NoError(t, err)
+	assert.Equal(t, c1, metadata.Certificate)
+
+	rows, err := db.Query(`SELECT projects.name FROM identities_projects JOIN projects ON identities_projects.project_id = projects.id WHERE identity_id = ?`, identity.ID)
+	require.NoError(t, err)
+	var projectNames []string
+	for rows.Next() {
+		var projectName string
+		err = rows.Scan(&projectName)
+		require.NoError(t, err)
+		projectNames = append(projectNames, projectName)
+	}
+
+	assert.ElementsMatch(t, []string{"p1", "p2", "p3"}, projectNames)
+
+	identity = getTLSIdentityByFingerprint("86ec60c8d88f60b4844d3a8849b262c77cb18e88394deeef45f0570ce713864c")
+	assert.Equal(t, api.IdentityTypeCertificateClientUnrestricted, string(identity.Type))
+	assert.Equal(t, "unrestricted-client", identity.Name)
+	err = json.Unmarshal([]byte(identity.Metadata), &metadata)
+	require.NoError(t, err)
+	assert.Equal(t, c2, metadata.Certificate)
+
+	identity = getTLSIdentityByFingerprint("49b262c77cb18e88394d8e6ec60c8d8eef45f0570ce713864c8f60b4844d3a88")
+	assert.Equal(t, api.IdentityTypeCertificateServer, string(identity.Type))
+	assert.Equal(t, "server", identity.Name)
+	err = json.Unmarshal([]byte(identity.Metadata), &metadata)
+	require.NoError(t, err)
+	assert.Equal(t, c1, metadata.Certificate)
+
+	identity = getTLSIdentityByFingerprint("60c8d8eef45f0570ce713864c8f60b4844d3a8849b262c77cb18e88394d8e6ec")
+	assert.Equal(t, api.IdentityTypeCertificateMetricsRestricted, string(identity.Type))
+	assert.Equal(t, "metrics", identity.Name)
+	err = json.Unmarshal([]byte(identity.Metadata), &metadata)
+	require.NoError(t, err)
+	assert.Equal(t, c2, metadata.Certificate)
+
+	identity = getTLSIdentityByFingerprint("47c88da8fd0cb9a8d44768a445e6c27aee44e078ce74cbaec0726de427bac056")
+	assert.Equal(t, api.IdentityTypeCertificateMetricsUnrestricted, string(identity.Type))
+	assert.Equal(t, "metrics", identity.Name)
+	err = json.Unmarshal([]byte(identity.Metadata), &metadata)
+	require.NoError(t, err)
+	assert.Equal(t, c2, metadata.Certificate)
 }

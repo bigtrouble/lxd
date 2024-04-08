@@ -11,6 +11,7 @@ After installing LXD, make sure you have a `lxd` group on your system.
 Users in this group can interact with LXD.
 See {ref}`installing-manage-access` for instructions.
 
+(installing-release)=
 ## Choose your release
 
 % Include content from [support.md](support.md)
@@ -47,12 +48,16 @@ Complete the following steps to install the snap:
    If it is not, use one of the {ref}`installing-other`.
 
 1. Install `snapd`.
-   See the [installation instructions](https://snapcraft.io/docs/core/install) in the Snapcraft documentation.
+   See the [installation instructions](https://snapcraft.io/docs/installing-snapd) in the Snapcraft documentation.
 
 1. Install the snap package.
    For the latest feature release, use:
 
-        sudo snap install lxd
+        sudo snap install lxd --channel=latest/stable
+
+   For the LXD 5.21 LTS release, use:
+
+        sudo snap install lxd --channel=5.21/stable
 
    For the LXD 5.0 LTS release, use:
 
@@ -61,9 +66,14 @@ Complete the following steps to install the snap:
 For more information about LXD snap packages (regarding more versions, update management etc.), see [Managing the LXD snap](https://discuss.linuxcontainers.org/t/managing-the-lxd-snap/8178).
 
 ```{note}
-On Ubuntu 18.04, if you previously had the LXD deb package installed, you can migrate all your existing data over with the following command:
+On Ubuntu 18.04, if you previously had the LXD deb package installed, you can migrate all your existing data over by installing the 5.0 snap and running the following commands:
 
+        sudo install lxd --channel=5.0/stable
         sudo lxd.migrate
+
+After successfully running the `lxd.migrate` command, you can then switch to a newer snap channel if desired, like the latest one:
+
+        sudo refresh lxd --channel=latest/stable
 ```
 
 (installing-other)=
@@ -140,9 +150,9 @@ To install it:
 
 You can also find native builds of the LXD client on [GitHub](https://github.com/canonical/lxd/actions):
 
-- [LXD client for Linux](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxc)
-- [LXD client for Windows](https://github.com/canonical/lxd/releases/latest/download/bin.windows.lxc.exe)
-- [LXD client for macOS](https://github.com/canonical/lxd/releases/latest/download/bin.macos.lxc)
+- LXD client for Linux: [`bin.linux.lxc.aarch64`](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxc.aarch64), [`bin.linux.lxc.x86_64`](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxc.x86_64)
+- LXD client for Windows: [`bin.windows.lxc.aarch64.exe`](https://github.com/canonical/lxd/releases/latest/download/bin.windows.lxc.aarch64.exe), [`bin.windows.lxc.x86_64.exe`](https://github.com/canonical/lxd/releases/latest/download/bin.windows.lxc.x86_64.exe)
+- LXD client for macOS: [`bin.macos.lxc.aarch64`](https://github.com/canonical/lxd/releases/latest/download/bin.macos.lxc.aarch64), [`bin.macos.lxc.x86_64`](https://github.com/canonical/lxd/releases/latest/download/bin.macos.lxc.x86_64)
 
 To download a specific build:
 
@@ -155,13 +165,22 @@ To download a specific build:
 
 Follow these instructions if you want to build and install LXD from the source code.
 
-We recommend having the latest versions of `liblxc` (>= 4.0.0 required)
-available for LXD development. Additionally, LXD requires Golang 1.18 or
-later to work. On Ubuntu, you can get those with:
+We recommend having the latest versions of `liblxc` (see {ref}`LXC requirements <requirements-lxc>`)
+available for LXD development. Additionally, LXD requires a modern Golang (see {ref}`requirements-go`)
+version to work. On Ubuntu, you can get those with:
 
 ```bash
 sudo apt update
-sudo apt install acl attr autoconf automake dnsmasq-base git golang libacl1-dev libcap-dev liblxc1 liblxc-dev libsqlite3-dev libtool libudev-dev liblz4-dev libuv1-dev make pkg-config rsync squashfs-tools tar tcl xz-utils ebtables
+sudo apt install acl attr autoconf automake dnsmasq-base git libacl1-dev libcap-dev liblxc1 liblxc-dev libsqlite3-dev libtool libudev-dev liblz4-dev libuv1-dev make pkg-config rsync squashfs-tools tar tcl xz-utils ebtables
+command -v snap >/dev/null || sudo apt-get install snapd
+sudo snap install --classic go
+```
+
+```{note}
+If you use the `liblxc-dev` package and get compile time errors when building the `go-lxc` module,
+ensure that the value for `LXC_DEVEL` is `0` for your `liblxc` build. To check that, look at `/usr/include/lxc/version.h`.
+If the `LXC_DEVEL` value is `1`, replace it with `0` to work around the problem. It's a packaging bug that is now fixed,
+see [LP: #2039873](https://bugs.launchpad.net/ubuntu/+source/lxc/+bug/2039873).
 ```
 
 There are a few storage drivers for LXD besides the default `dir` driver.

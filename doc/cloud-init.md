@@ -30,11 +30,8 @@ Rebooting the instance does not re-trigger the actions.
 
 ## `cloud-init` support in images
 
-To use `cloud-init`, you must base your instance on an image that has `cloud-init` installed:
-
-* All images from the `ubuntu` and `ubuntu-daily` {ref}`image servers <remote-image-servers>` have `cloud-init` support.
-* Images from the [`images` remote](https://images.linuxcontainers.org/) have `cloud-init`-enabled variants, which are usually bigger in size than the default variant.
-  The cloud variants use the `/cloud` suffix, for example, `images:ubuntu/22.04/cloud`.
+To use `cloud-init`, you must base your instance on an image that has `cloud-init` installed, which is the case for all images from the `ubuntu` and `ubuntu-daily` {ref}`image servers <remote-image-servers>`.
+However, images for Ubuntu releases prior to `20.04` require special handling to integrate properly with `cloud-init`, so that `lxc exec` works correctly with virtual machines that use those images. Refer to {ref}`vm-cloud-init-config`.
 
 ## Configuration options
 
@@ -70,7 +67,7 @@ To configure `cloud-init` for an instance, add the corresponding configuration o
 
 When configuring `cloud-init` directly for an instance, keep in mind that `cloud-init` runs only on the first start of the instance.
 That means that you must configure `cloud-init` before you start the instance.
-To do so, create the instance with [`lxc init`](lxc_init.md) instead of [`lxc launch`](lxc_launch.md), and then start it after completing the configuration.
+If you are using the CLI client, create the instance with [`lxc init`](lxc_init.md) instead of [`lxc launch`](lxc_launch.md), and then start it after completing the configuration.
 
 ### YAML format for `cloud-init` configuration
 
@@ -92,8 +89,37 @@ config:
 ```
 
 ```{tip}
-See {doc}`cloud-init:howto/debug_user_data` for information on how to check whether the syntax is correct.
+See {ref}`How to validate user data <cloud-init:check_user_data_cloud_config>` for information on how to check whether the syntax is correct.
 ```
+
+### Configure `cloud-init` through the API
+
+If you are using the API to configure your instance, provide the `cloud-init` configuration as a string with escaped newline characters.
+
+For example:
+
+    lxc query --request PATCH /1.0/instances/<instance_name> --data '{
+      "config": {
+        "cloud-init.user-data": "#cloud-config\npackage_upgrade: true\npackages:\n  - package1\n  - package2"
+      }
+    }'
+
+Alternatively, to avoid mistakes, write the configuration to a file and include that in your request.
+For example, create `cloud-init.txt` with the following content:
+
+    #cloud-config
+    package_upgrade: true
+    packages:
+      - package1
+      - package2
+
+Then send the following request:
+
+    lxc query --request PATCH /1.0/instances/<instance_name> --data '{
+    "config": {
+      "cloud-init.user-data": "'"$(awk -v ORS='\\n' '1' cloud-init.txt)"'"
+      }
+    }'
 
 ## How to check the `cloud-init` status
 

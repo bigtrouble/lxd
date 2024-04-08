@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // FdsetFdInfo contains information about a file descriptor that belongs to an FD set.
@@ -519,6 +519,38 @@ func (m *Monitor) RemoveBlockDevice(blockDevName string) error {
 	return nil
 }
 
+// AddCharDevice adds a new character device.
+func (m *Monitor) AddCharDevice(device map[string]any) error {
+	if device != nil {
+		err := m.run("chardev-add", device, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// RemoveCharDevice removes a character device.
+func (m *Monitor) RemoveCharDevice(deviceID string) error {
+	if deviceID != "" {
+		deviceID := map[string]string{
+			"id": deviceID,
+		}
+
+		err := m.run("chardev-remove", deviceID, nil)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return nil
+			}
+
+			return err
+		}
+	}
+
+	return nil
+}
+
 // AddDevice adds a new device.
 func (m *Monitor) AddDevice(device map[string]string) error {
 	if device != nil {
@@ -960,6 +992,49 @@ func (m *Monitor) BlockJobComplete(deviceNodeName string) error {
 	args.Device = deviceNodeName
 
 	err := m.run("block-job-complete", args, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Eject ejects a removable drive.
+func (m *Monitor) Eject(id string) error {
+	var args struct {
+		ID string `json:"id"`
+	}
+
+	args.ID = id
+
+	err := m.run("eject", args, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SetBlockThrottle applies an I/O limit on a disk.
+func (m *Monitor) SetBlockThrottle(id string, bytesRead int, bytesWrite int, iopsRead int, iopsWrite int) error {
+	var args struct {
+		ID string `json:"id"`
+
+		Bytes      int `json:"bps"`
+		BytesRead  int `json:"bps_rd"`
+		BytesWrite int `json:"bps_wr"`
+		IOPs       int `json:"iops"`
+		IOPsRead   int `json:"iops_rd"`
+		IOPsWrite  int `json:"iops_wr"`
+	}
+
+	args.ID = id
+	args.BytesRead = bytesRead
+	args.BytesWrite = bytesWrite
+	args.IOPsRead = iopsRead
+	args.IOPsWrite = iopsWrite
+
+	err := m.run("block_set_io_throttle", args, nil)
 	if err != nil {
 		return err
 	}

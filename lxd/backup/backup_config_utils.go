@@ -14,7 +14,6 @@ import (
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/state"
-	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/osarch"
 )
@@ -95,7 +94,7 @@ func ParseConfigYamlFile(path string) (*config.Config, error) {
 // specified. Returns true if a root disk device has been found and updated otherwise false.
 func updateRootDevicePool(devices map[string]map[string]string, poolName string) bool {
 	if devices != nil {
-		devName, _, err := shared.GetRootDiskDevice(devices)
+		devName, _, err := instancetype.GetRootDiskDevice(devices)
 		if err == nil {
 			devices[devName]["pool"] = poolName
 			return true
@@ -125,10 +124,20 @@ func UpdateInstanceConfig(c *db.Cluster, b Info, mountPath string) error {
 	if backup.Volume != nil {
 		backup.Volume.Name = b.Name
 		backup.Volume.Project = b.Project
+
+		// Ensure the most recent volume UUIDs get updated.
+		backup.Volume.Config = b.Config.Volume.Config
+		backup.VolumeSnapshots = b.Config.VolumeSnapshots
 	}
 
-	// Load the storage pool.
-	_, pool, _, err := c.GetStoragePool(b.Pool)
+	var pool *api.StoragePool
+
+	err = c.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Load the storage pool.
+		_, pool, _, err = tx.GetStoragePool(ctx, b.Pool)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}

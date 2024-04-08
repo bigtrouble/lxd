@@ -12,11 +12,15 @@ When contributing, you must adhere to the Code of Conduct, which is available at
 
 ## License and copyright
 
-By default, any contribution to this project is made under the Apache
-2.0 license.
+All contributors must sign the [Canonical contributor license agreement](https://ubuntu.com/legal/contributors), which gives Canonical permission to use the contributions. The author of a change remains the copyright holder of their code (no copyright assignment).
 
-The author of a change remains the copyright holder of their code
-(no copyright assignment).
+By default, any contribution to this project is licensed out under the project license: AGPL-3.0-only.
+
+By exception, Canonical may import code under licenses compatible with AGPL-3.0-only, such as Apache-2.0.
+Such code will remain under its original license and will be identified as such in the commit message or its file header.
+
+Some files and commits are licensed out under Apache-2.0 rather than AGPL-3.0-only.
+These are marked as Apache-2.0 in their package-level COPYING file, file header or commit message.
 
 ## Pull requests
 
@@ -30,7 +34,7 @@ be merged in the main branch.
 
 Separate commits should be used for:
 
-- API extension (`api: Add XYZ extension`, contains `doc/api-extensions.md` and `shared/version.api.go`)
+- API extension (`api: Add XYZ extension`, contains `doc/api-extensions.md` and `shared/version/api.go`)
 - Documentation (`doc: Update XYZ` for files in `doc/`)
 - API structure (`shared/api: Add XYZ` for changes to `shared/api/`)
 - Go client package (`client: Add XYZ` for changes to `client/`)

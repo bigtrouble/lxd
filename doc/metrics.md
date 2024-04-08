@@ -1,6 +1,5 @@
 ---
 discourse: 12281,11735
-relatedlinks: https://grafana.com/grafana/dashboards/19131-lxd/
 ---
 
 (metrics)=
@@ -13,7 +12,7 @@ relatedlinks: https://grafana.com/grafana/dashboards/19131-lxd/
 LXD collects metrics for all running instances as well as some internal metrics.
 These metrics cover the CPU, memory, network, disk and process usage.
 They are meant to be consumed by Prometheus, and you can use Grafana to display the metrics as graphs.
-See {ref}`provided-metrics` for lists of available metrics.
+See {ref}`provided-metrics` for lists of available metrics and {ref}`grafana` for instructions on how to display the metrics in Grafana.
 <!-- Include end metrics intro -->
 
 In a cluster environment, LXD returns only the values for instances running on the server that is being accessed.
@@ -137,6 +136,10 @@ To do so, edit `/var/snap/prometheus/current/prometheus.yml` (if you are using t
 Here's what the configuration needs to look like:
 
 ```yaml
+global:
+  # How frequently to scrape targets by default. The Prometheus default value is 1m.
+  scrape_interval: 15s
+
 scrape_configs:
   - job_name: lxd
     metrics_path: '/1.0/metrics'
@@ -153,26 +156,34 @@ scrape_configs:
 ```
 
 ````{note}
-The `server_name` must be specified if the LXD server certificate does not contain the same host name as used in the `targets` list.
-To verify this, open `server.crt` and check the Subject Alternative Name (SAN) section.
+* By default, the Grafana Prometheus data source assumes the `scrape_interval` to be 15 seconds.
+  If you decide to use a different `scrape_interval` value, you must change it in both the Prometheus configuration and the Grafana Prometheus data source configuration.
+  Otherwise, the Grafana `$__rate_interval` value will be calculated incorrectly, which might cause a `no data` response in queries that use it.
 
-For example, assume that `server.crt` has the following content:
+* The `server_name` must be specified if the LXD server certificate does not contain the same host name as used in the `targets` list.
+  To verify this, open `server.crt` and check the Subject Alternative Name (SAN) section.
 
-```{terminal}
-:input: openssl x509 -noout -text -in /var/snap/prometheus/common/tls/server.crt
+  For example, assume that `server.crt` has the following content:
 
-...
-            X509v3 Subject Alternative Name:
-                DNS:foo, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1
-...
-```
+  ```{terminal}
+  :input: openssl x509 -noout -text -in /var/snap/prometheus/common/tls/server.crt
 
-Since the Subject Alternative Name (SAN) list doesn't include the host name provided in the `targets` list (`foo.example.com`), you must override the name used for comparison using the `server_name` directive.
+  ...
+              X509v3 Subject Alternative Name:
+                  DNS:foo, IP Address:127.0.0.1, IP Address:0:0:0:0:0:0:0:1
+  ...
+  ```
+
+  Since the Subject Alternative Name (SAN) list doesn't include the host name provided in the `targets` list (`foo.example.com`), you must override the name used for comparison using the `server_name` directive.
 ````
 
 Here is an example of a `prometheus.yml` configuration where multiple jobs are used to scrape the metrics of multiple LXD servers:
 
 ```yaml
+global:
+  # How frequently to scrape targets by default. The Prometheus default value is 1m.
+  scrape_interval: 15s
+
 scrape_configs:
   # abydos, langara and orilla are part of a single cluster (called `hdc` here)
   # initially bootstrapped by abydos which is why all 3 targets
@@ -238,63 +249,3 @@ scrape_configs:
 ```
 
 After editing the configuration, restart Prometheus (for example, `snap restart prometheus`) to start scraping.
-
-## Set up a Grafana dashboard
-
-To visualize the metrics data, set up [Grafana](https://grafana.com/).
-LXD provides a [Grafana dashboard](https://grafana.com/grafana/dashboards/19131-lxd/) that is configured to display the LXD metrics scraped by Prometheus.
-
-```{note}
-The dashboard requires Grafana 8.4 or later.
-```
-
-See the Grafana documentation for instructions on installing and signing in:
-
-- [Install Grafana](https://grafana.com/docs/grafana/latest/setup-grafana/installation/)
-- [Sign in to Grafana](https://grafana.com/docs/grafana/latest/setup-grafana/sign-in-to-grafana/)
-
-Complete the following steps to import the [LXD dashboard](https://grafana.com/grafana/dashboards/19131-lxd/):
-
-1. Configure Prometheus as the data source:
-
-   1. Go to {guilabel}`Configuration` > {guilabel}`Data sources`.
-   1. Click {guilabel}`Add data source`.
-
-      ![Add data source in Grafana](images/grafana_add_datasource.png)
-
-   1. Select {guilabel}`Prometheus`.
-
-      ![Select Prometheus as the data source](images/grafana_select_prometheus.png)
-
-   1. In the {guilabel}`URL` field, enter `http://localhost:9090/`.
-
-      ![Enter Prometheus URL](images/grafana_configure_datasource.png)
-
-   1. Keep the default configuration for the other fields and click {guilabel}`Save & test`.
-
-1. Import the LXD dashboard:
-
-   1. Go to {guilabel}`Dashboards` > {guilabel}`Browse`.
-   1. Click {guilabel}`New` and select {guilabel}`Import`.
-
-      ![Import a dashboard in Grafana](images/grafana_dashboard_import.png)
-
-   1. In the {guilabel}`Import via grafana.com` field, enter the dashboard ID `19131`.
-
-      ![Enter the LXD dashboard ID](images/grafana_dashboard_id.png)
-
-   1. Click {guilabel}`Load`.
-   1. In the {guilabel}`LXD` drop-down menu, select the Prometheus data source that you configured.
-
-      ![Select the Prometheus data source](images/grafana_dashboard_select_datasource.png)
-
-   1. Click {guilabel}`Import`.
-
-You should now see the LXD dashboard.
-You can select the project and filter by instances.
-
-![Resource overview in the LXD Grafana dashboard](images/grafana_resources.png)
-
-At the bottom of the page, you can see data for each instance.
-
-![Instance data in the LXD Grafana dashboard](images/grafana_instances.png)

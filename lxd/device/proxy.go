@@ -15,7 +15,6 @@ import (
 
 	"github.com/canonical/lxd/lxd/apparmor"
 	"github.com/canonical/lxd/lxd/db"
-	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/warningtype"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/device/nictype"
@@ -23,13 +22,15 @@ import (
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/ip"
+	"github.com/canonical/lxd/lxd/linux"
 	"github.com/canonical/lxd/lxd/network"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/subprocess"
 	"github.com/canonical/lxd/lxd/warnings"
 	"github.com/canonical/lxd/shared"
-	"github.com/canonical/lxd/shared/linux"
+	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
-	"github.com/canonical/lxd/shared/subprocess"
 	"github.com/canonical/lxd/shared/validate"
 )
 
@@ -80,15 +81,83 @@ func (d *proxy) validateConfig(instConf instance.ConfigReader) error {
 	}
 
 	rules := map[string]func(string) error{
-		"listen":         validate.Required(validateAddr),
-		"connect":        validate.Required(validateAddr),
-		"bind":           validate.Optional(validateBind),
-		"mode":           validate.Optional(unixValidOctalFileMode),
-		"nat":            validate.Optional(validate.IsBool),
-		"gid":            validate.Optional(unixValidUserID),
-		"uid":            validate.Optional(unixValidUserID),
-		"security.uid":   validate.Optional(unixValidUserID),
-		"security.gid":   validate.Optional(unixValidUserID),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=listen)
+		// Use the following format to specify the address and port: `<type>:<addr>:<port>[-<port>][,<port>]`
+		// ---
+		//  type: string
+		//  required: yes
+		//  shortdesc: Address and port to bind and listen
+		"listen": validate.Required(validateAddr),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=connect)
+		// Use the following format to specify the address and port: `<type>:<addr>:<port>[-<port>][,<port>]`
+		// ---
+		//  type: string
+		//  required: yes
+		//  shortdesc: Address and port to connect to
+		"connect": validate.Required(validateAddr),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=bind)
+		// Possible values are `host` and `instance`.
+		// ---
+		//  type: string
+		//  defaultdesc: `host`
+		//  required: no
+		//  shortdesc: Which side to bind on
+		"bind": validate.Optional(validateBind),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=mode)
+		//
+		// ---
+		//  type: integer
+		//  defaultdesc: `0644`
+		//  required: no
+		//  shortdesc: Mode for the listening Unix socket
+		"mode": validate.Optional(unixValidOctalFileMode),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=nat)
+		// This option requires that the instance NIC has a static IP address.
+		// ---
+		//  type: bool
+		//  defaultdesc: `false`
+		//  required: no
+		//  shortdesc: Whether to optimize proxying via NAT
+		"nat": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=gid)
+		//
+		// ---
+		//  type: integer
+		//  defaultdesc: `0`
+		//  required: no
+		//  shortdesc: GID of the owner of the listening Unix socket
+		"gid": validate.Optional(unixValidUserID),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=uid)
+		//
+		// ---
+		//  type: integer
+		//  defaultdesc: `0`
+		//  required: no
+		//  shortdesc: UID of the owner of the listening Unix socket
+		"uid": validate.Optional(unixValidUserID),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=security.uid)
+		//
+		// ---
+		//  type: integer
+		//  defaultdesc: `0`
+		//  required: no
+		//  shortdesc: What UID to drop privilege to
+		"security.uid": validate.Optional(unixValidUserID),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=security.gid)
+		//
+		// ---
+		//  type: integer
+		//  defaultdesc: `0`
+		//  required: no
+		//  shortdesc: What GID to drop privilege to
+		"security.gid": validate.Optional(unixValidUserID),
+		// lxdmeta:generate(entities=device-proxy; group=device-conf; key=proxy_protocol)
+		// This option specifies whether to use the HAProxy PROXY protocol to transmit sender information.
+		// ---
+		//  type: bool
+		//  defaultdesc: `false`
+		//  required: no
+		//  shortdesc: Whether to use the HAProxy PROXY protocol
 		"proxy_protocol": validate.Optional(validate.IsBool),
 	}
 
@@ -135,7 +204,7 @@ func (d *proxy) validateConfig(instConf instance.ConfigReader) error {
 			// Default project always has networks feature so don't bother loading the project config
 			// in that case.
 			instProject := d.inst.Project()
-			if instProject.Name != project.Default && shared.IsTrue(instProject.Config["features.networks"]) {
+			if instProject.Name != api.ProjectDefaultName && shared.IsTrue(instProject.Config["features.networks"]) {
 				// Prevent use of NAT mode on non-default projects with networks feature.
 				// This is because OVN networks don't allow the host to communicate directly with
 				// instance NICs and so DNAT rules on the host won't work.
@@ -406,7 +475,8 @@ func (d *proxy) setupNAT() error {
 			return err
 		}
 
-		if nicType != "bridged" {
+		// Check if the instance has a NIC with a static IP that is reachable from the host.
+		if !shared.ValueInSlice(nicType, []string{"bridged", "routed"}) {
 			continue
 		}
 
@@ -445,12 +515,14 @@ func (d *proxy) setupNAT() error {
 	if err != nil {
 		msg := fmt.Sprintf("IPv%d bridge netfilter not enabled. Instances using the bridge will not be able to connect to the proxy listen IP", ipVersion)
 		d.logger.Warn(msg, logger.Ctx{"err": err})
-		err := d.state.DB.Cluster.UpsertWarningLocalNode(d.inst.Project().Name, cluster.TypeInstance, d.inst.ID(), warningtype.ProxyBridgeNetfilterNotEnabled, fmt.Sprintf("%s: %v", msg, err))
+		err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.UpsertWarningLocalNode(ctx, d.inst.Project().Name, entity.TypeInstance, d.inst.ID(), warningtype.ProxyBridgeNetfilterNotEnabled, fmt.Sprintf("%s: %v", msg, err))
+		})
 		if err != nil {
 			logger.Warn("Failed to create warning", logger.Ctx{"err": err})
 		}
 	} else {
-		err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(d.state.DB.Cluster, d.inst.Project().Name, warningtype.ProxyBridgeNetfilterNotEnabled, cluster.TypeInstance, d.inst.ID())
+		err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(d.state.DB.Cluster, d.inst.Project().Name, warningtype.ProxyBridgeNetfilterNotEnabled, entity.TypeInstance, d.inst.ID())
 		if err != nil {
 			logger.Warn("Failed to resolve warning", logger.Ctx{"err": err})
 		}
@@ -596,8 +668,9 @@ func (d *proxy) killProxyProc(pidPath string) error {
 	return nil
 }
 
+// Remove removes the proxy device.
 func (d *proxy) Remove() error {
-	err := warnings.DeleteWarningsByLocalNodeAndProjectAndTypeAndEntity(d.state.DB.Cluster, d.inst.Project().Name, warningtype.ProxyBridgeNetfilterNotEnabled, cluster.TypeInstance, d.inst.ID())
+	err := warnings.DeleteWarningsByLocalNodeAndProjectAndTypeAndEntity(d.state.DB.Cluster, d.inst.Project().Name, warningtype.ProxyBridgeNetfilterNotEnabled, entity.TypeInstance, d.inst.ID())
 	if err != nil {
 		logger.Warn("Failed to delete warning", logger.Ctx{"err": err})
 	}

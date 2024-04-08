@@ -8,12 +8,13 @@ import (
 	"os/exec"
 	"strings"
 
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/validate"
 )
@@ -78,17 +79,18 @@ func (d *ceph) isRemote() bool {
 // Info returns info about the driver and its environment.
 func (d *ceph) Info() Info {
 	return Info{
-		Name:              "ceph",
-		Version:           cephVersion,
-		OptimizedImages:   true,
-		PreservesInodes:   false,
-		Remote:            d.isRemote(),
-		VolumeTypes:       []VolumeType{VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
-		BlockBacking:      true,
-		RunningCopyFreeze: true,
-		DirectIO:          true,
-		IOUring:           true,
-		MountedRoot:       false,
+		Name:                         "ceph",
+		Version:                      cephVersion,
+		DefaultVMBlockFilesystemSize: deviceConfig.DefaultVMBlockFilesystemSize,
+		OptimizedImages:              true,
+		PreservesInodes:              false,
+		Remote:                       d.isRemote(),
+		VolumeTypes:                  []VolumeType{VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
+		BlockBacking:                 true,
+		RunningCopyFreeze:            true,
+		DirectIO:                     true,
+		IOUring:                      true,
+		MountedRoot:                  false,
 	}
 }
 
@@ -199,7 +201,7 @@ func (d *ceph) Create() error {
 			// ceph.osd.force_reuse is deprecated and should not be used. OSD pools are a logical
 			// construct there is no good reason not to create one for dedicated use by LXD.
 			if shared.IsFalseOrEmpty(d.config["ceph.osd.force_reuse"]) {
-				return fmt.Errorf("Pool '%s' in cluster '%s' seems to be in use by another LXD instance. Use 'ceph.osd.force_reuse=true' to force", d.config["ceph.osd.pool_name"], d.config["ceph.cluster_name"])
+				return fmt.Errorf("Pool '%s' in cluster '%s' seems to be in use by another LXD instance", d.config["ceph.osd.pool_name"], d.config["ceph.cluster_name"])
 			}
 
 			d.config["volatile.pool.pristine"] = "false"
@@ -287,16 +289,69 @@ func (d *ceph) Delete(op *operations.Operation) error {
 // Validate checks that all provide keys are supported and that no conflicting or missing configuration is present.
 func (d *ceph) Validate(config map[string]string) error {
 	rules := map[string]func(value string) error{
-		"ceph.cluster_name":       validate.IsAny,
-		"ceph.osd.force_reuse":    validate.Optional(validate.IsBool), // Deprecated, should not be used.
-		"ceph.osd.pg_num":         validate.IsAny,
-		"ceph.osd.pool_name":      validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.cluster_name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `ceph`
+		//  shortdesc: Name of the Ceph cluster in which to create new storage pools
+		"ceph.cluster_name":    validate.IsAny,
+		"ceph.osd.force_reuse": validate.Optional(validate.IsBool), // Deprecated, should not be used.
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.osd.pg_num)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `32`
+		//  shortdesc: Number of placement groups for the OSD storage pool
+		"ceph.osd.pg_num": validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.osd.pool_name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: name of the pool
+		//  shortdesc: Name of the OSD storage pool
+		"ceph.osd.pool_name": validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.osd.data_pool_name)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Name of the OSD data pool
 		"ceph.osd.data_pool_name": validate.IsAny,
-		"ceph.rbd.clone_copy":     validate.Optional(validate.IsBool),
-		"ceph.rbd.du":             validate.Optional(validate.IsBool),
-		"ceph.rbd.features":       validate.IsAny,
-		"ceph.user.name":          validate.IsAny,
-		"volatile.pool.pristine":  validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.rbd.clone_copy)
+		// Enable this option to use RBD lightweight clones rather than full dataset copies.
+		// ---
+		//  type: bool
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to use RBD lightweight clones
+		"ceph.rbd.clone_copy": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.rbd.du)
+		// This option specifies whether to use RBD `du` to obtain disk usage data for stopped instances.
+		// ---
+		//  type: bool
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to use RBD `du`
+		"ceph.rbd.du": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.rbd.features)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `layering`
+		//  shortdesc: Comma-separated list of RBD features to enable on the volumes
+		"ceph.rbd.features": validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=ceph.user.name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `admin`
+		//  shortdesc: The Ceph user to use when creating storage pools and volumes
+		"ceph.user.name": validate.IsAny,
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=volatile.pool.pristine)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `true`
+		//  shortdesc: Whether the pool was empty on creation time
+		"volatile.pool.pristine": validate.IsAny,
 	}
 
 	return d.validatePool(config, rules, d.commonVolumeRules())
@@ -399,24 +454,38 @@ func (d *ceph) MigrationTypes(contentType ContentType, refresh bool, copySnapsho
 	}
 
 	if refresh {
-		var transportType migration.MigrationFSType
-
 		if IsContentBlock(contentType) {
-			transportType = migration.MigrationFSType_BLOCK_AND_RSYNC
-		} else {
-			transportType = migration.MigrationFSType_RSYNC
+			return []migration.Type{
+				{
+					FSType:   migration.MigrationFSType_RBD_AND_RSYNC,
+					Features: rsyncFeatures,
+				},
+				{
+					FSType:   migration.MigrationFSType_BLOCK_AND_RSYNC,
+					Features: rsyncFeatures,
+				},
+			}
 		}
 
 		return []migration.Type{
 			{
-				FSType:   transportType,
+				FSType:   migration.MigrationFSType_RSYNC,
 				Features: rsyncFeatures,
 			},
 		}
 	}
 
-	if contentType == ContentTypeBlock {
+	if IsContentBlock(contentType) {
 		return []migration.Type{
+			// Prefer to use RBD_AND_RSYNC for the initial migration.
+			{
+				FSType:   migration.MigrationFSType_RBD_AND_RSYNC,
+				Features: rsyncFeatures,
+			},
+			// If RBD_AND_RSYNC is not supported by the target it will fall back to BLOCK_AND_RSYNC
+			// as RBD wasn't sent as the preferred method by the source.
+			// If the source sends RBD as the preferred method the target will accept RBD
+			// as it's in the list of supported migration types.
 			{
 				FSType: migration.MigrationFSType_RBD,
 			},

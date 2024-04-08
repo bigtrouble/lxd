@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/network"
 	"github.com/canonical/lxd/lxd/project"
@@ -15,23 +18,24 @@ import (
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var networkPeersCmd = APIEndpoint{
 	Path: "networks/{networkName}/peers",
 
-	Get:  APIEndpointAction{Handler: networkPeersGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Post: APIEndpointAction{Handler: networkPeersPost, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Get:  APIEndpointAction{Handler: networkPeersGet, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanView, "networkName")},
+	Post: APIEndpointAction{Handler: networkPeersPost, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
 }
 
 var networkPeerCmd = APIEndpoint{
 	Path: "networks/{networkName}/peers/{peerName}",
 
-	Delete: APIEndpointAction{Handler: networkPeerDelete, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Get:    APIEndpointAction{Handler: networkPeerGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Put:    APIEndpointAction{Handler: networkPeerPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Patch:  APIEndpointAction{Handler: networkPeerPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Delete: APIEndpointAction{Handler: networkPeerDelete, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
+	Get:    APIEndpointAction{Handler: networkPeerGet, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanView, "networkName")},
+	Put:    APIEndpointAction{Handler: networkPeerPut, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
+	Patch:  APIEndpointAction{Handler: networkPeerPut, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
 }
 
 // API endpoints
@@ -131,7 +135,7 @@ var networkPeerCmd = APIEndpoint{
 func networkPeersGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -156,7 +160,13 @@ func networkPeersGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if util.IsRecursionRequest(r) {
-		records, err := s.DB.Cluster.GetNetworkPeers(n.ID())
+		var records map[int64]*api.NetworkPeer
+
+		err := s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			records, err = tx.GetNetworkPeers(ctx, n.ID())
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(fmt.Errorf("Failed loading network peers: %w", err))
 		}
@@ -164,13 +174,20 @@ func networkPeersGet(d *Daemon, r *http.Request) response.Response {
 		peers := make([]*api.NetworkPeer, 0, len(records))
 		for _, record := range records {
 			record.UsedBy, _ = n.PeerUsedBy(record.Name)
+			record.UsedBy = project.FilterUsedBy(s.Authorizer, r, record.UsedBy)
 			peers = append(peers, record)
 		}
 
 		return response.SyncResponse(true, peers)
 	}
 
-	peerNames, err := s.DB.Cluster.GetNetworkPeerNames(n.ID())
+	var peerNames map[int64]string
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		peerNames, err = tx.GetNetworkPeerNames(ctx, n.ID())
+
+		return err
+	})
 	if err != nil {
 		return response.SmartError(fmt.Errorf("Failed loading network peers: %w", err))
 	}
@@ -225,7 +242,7 @@ func networkPeersPost(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -299,7 +316,7 @@ func networkPeerDelete(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -386,7 +403,7 @@ func networkPeerGet(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -415,12 +432,19 @@ func networkPeerGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	_, peer, err := s.DB.Cluster.GetNetworkPeer(n.ID(), peerName)
+	var peer *api.NetworkPeer
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_, peer, err = tx.GetNetworkPeer(ctx, n.ID(), peerName)
+
+		return err
+	})
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	peer.UsedBy, _ = n.PeerUsedBy(peer.Name)
+	peer.UsedBy = project.FilterUsedBy(s.Authorizer, r, peer.UsedBy)
 
 	return response.SyncResponseETag(true, peer, peer.Etag())
 }
@@ -502,7 +526,7 @@ func networkPeerPut(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}

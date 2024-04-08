@@ -8,15 +8,15 @@ import (
 	"strconv"
 
 	"github.com/canonical/lxd/lxd/backup"
+	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/rsync"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/instancewriter"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
 
@@ -62,12 +62,12 @@ func (d *cephfs) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.O
 }
 
 // CreateVolumeFromBackup re-creates a volume from its exported state.
-func (d *cephfs) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
+func (d *cephfs) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
 	return genericVFSBackupUnpack(d, d.state.OS, vol, srcBackup.Snapshots, srcData, op)
 }
 
 // CreateVolumeFromCopy copies an existing storage volume (with or without snapshots) into a new volume.
-func (d *cephfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, allowInconsistent bool, op *operations.Operation) error {
+func (d *cephfs) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, op *operations.Operation) error {
 	bwlimit := d.config["rsync.bwlimit"]
 
 	// Create the main volume path.
@@ -98,9 +98,9 @@ func (d *cephfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots b
 	// Ensure the volume is mounted.
 	err = vol.MountTask(func(mountPath string, op *operations.Operation) error {
 		// If copying snapshots is indicated, check the source isn't itself a snapshot.
-		if copySnapshots && !srcVol.IsSnapshot() {
+		if len(vol.Snapshots) > 0 && !srcVol.IsSnapshot() {
 			// Get the list of snapshots from the source.
-			srcSnapshots, err := srcVol.Snapshots(op)
+			srcSnapshots, err := srcVol.Volume.Snapshots(op)
 			if err != nil {
 				return err
 			}
@@ -127,7 +127,7 @@ func (d *cephfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots b
 		}
 
 		// Apply the volume quota if specified.
-		err = d.SetVolumeQuota(vol, vol.ConfigSize(), false, op)
+		err = d.SetVolumeQuota(vol.Volume, vol.ConfigSize(), false, op)
 		if err != nil {
 			return err
 		}
@@ -154,7 +154,7 @@ func (d *cephfs) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots b
 }
 
 // CreateVolumeFromMigration creates a new volume (with or without snapshots) from a migration data stream.
-func (d *cephfs) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
+func (d *cephfs) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
 	if volTargetArgs.MigrationType.FSType != migration.MigrationFSType_RSYNC {
 		return ErrNotSupported
 	}
@@ -216,7 +216,7 @@ func (d *cephfs) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, 
 
 		if vol.contentType == ContentTypeFS {
 			// Apply the size limit.
-			err = d.SetVolumeQuota(vol, vol.ConfigSize(), false, op)
+			err = d.SetVolumeQuota(vol.Volume, vol.ConfigSize(), false, op)
 			if err != nil {
 				return err
 			}
@@ -345,7 +345,11 @@ func (d *cephfs) ListVolumes() ([]Volume, error) {
 
 // MountVolume sets up the volume for use.
 func (d *cephfs) MountVolume(vol Volume, op *operations.Operation) error {
-	unlock := vol.MountLock()
+	unlock, err := vol.MountLock()
+	if err != nil {
+		return err
+	}
+
 	defer unlock()
 
 	vol.MountRefCountIncrement() // From here on it is up to caller to call UnmountVolume() when done.
@@ -355,7 +359,11 @@ func (d *cephfs) MountVolume(vol Volume, op *operations.Operation) error {
 // UnmountVolume clears any runtime state for the volume.
 // As driver doesn't have volumes to unmount it returns false indicating the volume was already unmounted.
 func (d *cephfs) UnmountVolume(vol Volume, keepBlockDev bool, op *operations.Operation) (bool, error) {
-	unlock := vol.MountLock()
+	unlock, err := vol.MountLock()
+	if err != nil {
+		return false, err
+	}
+
 	defer unlock()
 
 	refCount := vol.MountRefCountDecrement()
@@ -464,12 +472,12 @@ func (d *cephfs) RenameVolume(vol Volume, newVolName string, op *operations.Oper
 }
 
 // MigrateVolume streams the volume (with or without snapshots).
-func (d *cephfs) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
+func (d *cephfs) MigrateVolume(vol VolumeCopy, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
 	return genericVFSMigrateVolume(d, d.state, vol, conn, volSrcArgs, op)
 }
 
 // BackupVolume creates an exported version of a volume.
-func (d *cephfs) BackupVolume(vol Volume, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
+func (d *cephfs) BackupVolume(vol VolumeCopy, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
 	return genericVFSBackupVolume(d, vol, tarWriter, snapshots, op)
 }
 
@@ -527,7 +535,11 @@ func (d *cephfs) DeleteVolumeSnapshot(snapVol Volume, op *operations.Operation) 
 
 // MountVolumeSnapshot makes the snapshot available for use.
 func (d *cephfs) MountVolumeSnapshot(snapVol Volume, op *operations.Operation) error {
-	unlock := snapVol.MountLock()
+	unlock, err := snapVol.MountLock()
+	if err != nil {
+		return err
+	}
+
 	defer unlock()
 
 	snapVol.MountRefCountIncrement() // From here on it is up to caller to call UnmountVolumeSnapshot() when done.
@@ -536,7 +548,11 @@ func (d *cephfs) MountVolumeSnapshot(snapVol Volume, op *operations.Operation) e
 
 // UnmountVolumeSnapshot clears any runtime state for the snapshot.
 func (d *cephfs) UnmountVolumeSnapshot(snapVol Volume, op *operations.Operation) (bool, error) {
-	unlock := snapVol.MountLock()
+	unlock, err := snapVol.MountLock()
+	if err != nil {
+		return false, err
+	}
+
 	defer unlock()
 
 	refCount := snapVol.MountRefCountDecrement()
@@ -554,8 +570,9 @@ func (d *cephfs) VolumeSnapshots(vol Volume, op *operations.Operation) ([]string
 }
 
 // RestoreVolume resets a volume to its snapshotted state.
-func (d *cephfs) RestoreVolume(vol Volume, snapshotName string, op *operations.Operation) error {
+func (d *cephfs) RestoreVolume(vol Volume, snapVol Volume, op *operations.Operation) error {
 	sourcePath := GetVolumeMountPath(d.name, vol.volType, vol.name)
+	_, snapshotName, _ := api.GetParentAndSnapshotName(snapVol.name)
 	cephSnapPath := filepath.Join(sourcePath, ".snap", snapshotName)
 
 	// Restore using rsync.

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/backup"
 	backupConfig "github.com/canonical/lxd/lxd/backup/config"
-	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
@@ -17,27 +17,28 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	storageDrivers "github.com/canonical/lxd/lxd/storage/drivers"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // Define API endpoints for recover actions.
 var internalRecoverValidateCmd = APIEndpoint{
 	Path: "recover/validate",
 
-	Post: APIEndpointAction{Handler: internalRecoverValidate},
+	Post: APIEndpointAction{Handler: internalRecoverValidate, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalRecoverImportCmd = APIEndpoint{
 	Path: "recover/import",
 
-	Post: APIEndpointAction{Handler: internalRecoverImport},
+	Post: APIEndpointAction{Handler: internalRecoverImport, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 // init recover adds API endpoints to handler slice.
@@ -130,11 +131,6 @@ func internalRecoverScan(s *state.State, userPools []api.StoragePoolsPost, valid
 		return response.SmartError(fmt.Errorf("Failed getting validate dependency check info: %w", err))
 	}
 
-	isClustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.SmartError(err)
-	}
-
 	res := internalRecoverValidateResult{}
 
 	revert := revert.New()
@@ -162,17 +158,18 @@ func internalRecoverScan(s *state.State, userPools []api.StoragePoolsPost, valid
 			if response.IsNotFoundError(err) {
 				// If the pool DB record doesn't exist, and we are clustered, then don't proceed
 				// any further as we do not support pool DB record recovery when clustered.
-				if isClustered {
+				if s.ServerClustered {
 					return response.BadRequest(fmt.Errorf("Storage pool recovery not supported when clustered"))
 				}
 
 				// If pool doesn't exist in DB, initialise a temporary pool with the supplied info.
 				poolInfo := api.StoragePool{
-					Name:           p.Name,
-					Driver:         p.Driver,
-					StoragePoolPut: p.StoragePoolPut,
-					Status:         api.StoragePoolStatusCreated,
+					Name:   p.Name,
+					Driver: p.Driver,
+					Status: api.StoragePoolStatusCreated,
 				}
+
+				poolInfo.SetWritable(p.StoragePoolPut)
 
 				pool, err = storagePools.NewTemporary(s, &poolInfo)
 				if err != nil {
@@ -410,7 +407,7 @@ func internalRecoverScan(s *state.State, userPools []api.StoragePoolsPost, valid
 			}
 
 			profileProjectName := project.ProfileProjectFromRecord(projectInfo)
-			customStorageProjectName := project.StorageVolumeProjectFromRecord(projectInfo, db.StoragePoolVolumeTypeCustom)
+			customStorageProjectName := project.StorageVolumeProjectFromRecord(projectInfo, dbCluster.StoragePoolVolumeTypeCustom)
 
 			// Recover unknown custom volumes (do this first before recovering instances so that any
 			// instances that reference unknown custom volume disk devices can be created).
@@ -482,7 +479,7 @@ func internalRecoverScan(s *state.State, userPools []api.StoragePoolsPost, valid
 
 				// Reinitialise the instance's root disk quota even if no size specified (allows the storage driver the
 				// opportunity to reinitialise the quota based on the new storage volume's DB ID).
-				_, rootConfig, err := shared.GetRootDiskDevice(inst.ExpandedDevices().CloneNative())
+				_, rootConfig, err := instancetype.GetRootDiskDevice(inst.ExpandedDevices().CloneNative())
 				if err == nil {
 					err = pool.SetInstanceQuota(inst, rootConfig["size"], rootConfig["size.state"], nil)
 					if err != nil {

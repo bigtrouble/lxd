@@ -12,9 +12,11 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/canonical/lxd/client"
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/cluster"
 	clusterRequest "github.com/canonical/lxd/lxd/cluster/request"
 	"github.com/canonical/lxd/lxd/db"
+	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
@@ -24,6 +26,7 @@ import (
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -35,16 +38,16 @@ var storagePoolsCmd = APIEndpoint{
 	Path: "storage-pools",
 
 	Get:  APIEndpointAction{Handler: storagePoolsGet, AccessHandler: allowAuthenticated},
-	Post: APIEndpointAction{Handler: storagePoolsPost},
+	Post: APIEndpointAction{Handler: storagePoolsPost, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanCreateStoragePools)},
 }
 
 var storagePoolCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}",
 
-	Delete: APIEndpointAction{Handler: storagePoolDelete},
-	Get:    APIEndpointAction{Handler: storagePoolGet, AccessHandler: allowAuthenticated},
-	Patch:  APIEndpointAction{Handler: storagePoolPatch},
-	Put:    APIEndpointAction{Handler: storagePoolPut},
+	Delete: APIEndpointAction{Handler: storagePoolDelete, AccessHandler: allowPermission(entity.TypeStoragePool, auth.EntitlementCanDelete, "poolName")},
+	Get:    APIEndpointAction{Handler: storagePoolGet, AccessHandler: allowPermission(entity.TypeStoragePool, auth.EntitlementCanView, "poolName")},
+	Patch:  APIEndpointAction{Handler: storagePoolPatch, AccessHandler: allowPermission(entity.TypeStoragePool, auth.EntitlementCanEdit, "poolName")},
+	Put:    APIEndpointAction{Handler: storagePoolPut, AccessHandler: allowPermission(entity.TypeStoragePool, auth.EntitlementCanEdit, "poolName")},
 }
 
 // swagger:operation GET /1.0/storage-pools storage storage_pools_get
@@ -144,14 +147,22 @@ func storagePoolsGet(d *Daemon, r *http.Request) response.Response {
 
 	recursion := util.IsRecursionRequest(r)
 
-	poolNames, err := s.DB.Cluster.GetStoragePoolNames()
+	var poolNames []string
+
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		poolNames, err = tx.GetStoragePoolNames(ctx)
+
+		return err
+	})
 	if err != nil && !response.IsNotFoundError(err) {
 		return response.SmartError(err)
 	}
 
-	clustered, err := cluster.Enabled(s.DB.Node)
+	hasEditPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanEdit, entity.TypeStoragePool)
 	if err != nil {
-		return response.SmartError(err)
+		return response.InternalError(err)
 	}
 
 	resultString := []string{}
@@ -174,13 +185,13 @@ func storagePoolsGet(d *Daemon, r *http.Request) response.Response {
 			poolAPI := pool.ToAPI()
 			poolAPI.UsedBy = project.FilterUsedBy(s.Authorizer, r, poolUsedBy)
 
-			if !s.Authorizer.UserIsAdmin(r) {
+			if !hasEditPermission(entity.StoragePoolURL(poolName)) {
 				// Don't allow non-admins to see pool config as sensitive info can be stored there.
 				poolAPI.Config = nil
 			}
 
 			// If no member is specified and the daemon is clustered, we omit the node-specific fields.
-			if clustered {
+			if s.ServerClustered {
 				for _, key := range db.NodeSpecificStorageConfig {
 					delete(poolAPI.Config, key)
 				}
@@ -271,7 +282,7 @@ func storagePoolsPost(d *Daemon, r *http.Request) response.Response {
 
 	ctx := logger.Ctx{}
 
-	targetNode := queryParam(r, "target")
+	targetNode := request.QueryParam(r, "target")
 	if targetNode != "" {
 		ctx["target"] = targetNode
 	}
@@ -290,7 +301,15 @@ func storagePoolsPost(d *Daemon, r *http.Request) response.Response {
 			return response.BadRequest(err)
 		}
 
-		poolID, err := s.DB.Cluster.GetStoragePoolID(req.Name)
+		var poolID int64
+
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var err error
+
+			poolID, err = tx.GetStoragePoolID(ctx, req.Name)
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(err)
 		}
@@ -321,7 +340,7 @@ func storagePoolsPost(d *Daemon, r *http.Request) response.Response {
 			return tx.CreatePendingStoragePool(ctx, targetNode, req.Name, req.Driver, req.Config)
 		})
 		if err != nil {
-			if err == db.ErrAlreadyDefined {
+			if api.StatusErrorCheck(err, http.StatusConflict) {
 				return response.BadRequest(fmt.Errorf("The storage pool already defined on member %q", targetNode))
 			}
 
@@ -331,8 +350,16 @@ func storagePoolsPost(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	// Load existing pool if exists, if not don't fail.
-	_, pool, _, err := s.DB.Cluster.GetStoragePoolInAnyState(req.Name)
+	var pool *api.StoragePool
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		// Load existing pool if exists, if not don't fail.
+		_, pool, _, err = tx.GetStoragePoolInAnyState(ctx, req.Name)
+
+		return err
+	})
 	if err != nil && !response.IsNotFoundError(err) {
 		return response.InternalError(err)
 	}
@@ -358,7 +385,7 @@ func storagePoolsPost(d *Daemon, r *http.Request) response.Response {
 		}
 	}
 
-	s.Events.SendLifecycle(project.Default, lc)
+	s.Events.SendLifecycle(api.ProjectDefaultName, lc)
 
 	return resp
 }
@@ -584,13 +611,8 @@ func storagePoolGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.SmartError(err)
-	}
-
 	memberSpecific := false
-	if queryParam(r, "target") != "" {
+	if request.QueryParam(r, "target") != "" {
 		memberSpecific = true
 	}
 
@@ -609,13 +631,16 @@ func storagePoolGet(d *Daemon, r *http.Request) response.Response {
 	poolAPI := pool.ToAPI()
 	poolAPI.UsedBy = project.FilterUsedBy(s.Authorizer, r, poolUsedBy)
 
-	if !s.Authorizer.UserIsAdmin(r) {
-		// Don't allow non-admins to see pool config as sensitive info can be stored there.
+	err = s.Authorizer.CheckPermission(r.Context(), r, entity.StoragePoolURL(poolName), auth.EntitlementCanEdit)
+	if err != nil && !auth.IsDeniedError(err) {
+		return response.SmartError(err)
+	} else if err != nil {
+		// Only allow users that can edit storage pool config to view it as sensitive info can be stored there.
 		poolAPI.Config = nil
 	}
 
 	// If no member is specified and the daemon is clustered, we omit the node-specific fields.
-	if clustered && !memberSpecific {
+	if s.ServerClustered && !memberSpecific {
 		for _, key := range db.NodeSpecificStorageConfig {
 			delete(poolAPI.Config, key)
 		}
@@ -624,7 +649,7 @@ func storagePoolGet(d *Daemon, r *http.Request) response.Response {
 		poolAPI.Status = pool.LocalStatus()
 	}
 
-	etag := []any{pool.Name, pool.Driver, poolAPI.Config}
+	etag := []any{pool.Name(), pool.Driver().Info().Name, pool.Description(), poolAPI.Config}
 
 	return response.SyncResponseETag(true, &poolAPI, etag)
 }
@@ -688,11 +713,7 @@ func storagePoolPut(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	targetNode := queryParam(r, "target")
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.SmartError(err)
-	}
+	targetNode := request.QueryParam(r, "target")
 
 	if targetNode == "" && pool.Status() != api.StoragePoolStatusCreated {
 		return response.BadRequest(fmt.Errorf("Cannot update storage pool global config when not in created state"))
@@ -704,14 +725,14 @@ func storagePoolPut(d *Daemon, r *http.Request) response.Response {
 	// If no target node is specified and the daemon is clustered, we omit the node-specific fields so that
 	// the e-tag can be generated correctly. This is because the GET request used to populate the request
 	// will also remove node-specific keys when no target is specified.
-	if targetNode == "" && clustered {
+	if targetNode == "" && s.ServerClustered {
 		for _, key := range db.NodeSpecificStorageConfig {
 			delete(etagConfig, key)
 		}
 	}
 
 	// Validate the ETag.
-	etag := []any{pool.Name(), pool.Driver().Info().Name, etagConfig}
+	etag := []any{pool.Name(), pool.Driver().Info().Name, pool.Description(), etagConfig}
 
 	err = util.EtagCheck(r, etag)
 	if err != nil {
@@ -727,7 +748,7 @@ func storagePoolPut(d *Daemon, r *http.Request) response.Response {
 
 	// In clustered mode, we differentiate between node specific and non-node specific config keys based on
 	// whether the user has specified a target to apply the config to.
-	if clustered {
+	if s.ServerClustered {
 		if targetNode == "" {
 			// If no target is specified, then ensure only non-node-specific config keys are changed.
 			for k := range req.Config {
@@ -749,7 +770,7 @@ func storagePoolPut(d *Daemon, r *http.Request) response.Response {
 
 	clientType := clusterRequest.UserAgentClientType(r.Header.Get("User-Agent"))
 
-	response := doStoragePoolUpdate(s, pool, req, targetNode, clientType, r.Method, clustered)
+	response := doStoragePoolUpdate(s, pool, req, targetNode, clientType, r.Method, s.ServerClustered)
 
 	requestor := request.CreateRequestor(r)
 
@@ -758,7 +779,7 @@ func storagePoolPut(d *Daemon, r *http.Request) response.Response {
 		ctx["target"] = targetNode
 	}
 
-	s.Events.SendLifecycle(project.Default, lifecycle.StoragePoolUpdated.Event(pool.Name(), requestor, ctx))
+	s.Events.SendLifecycle(api.ProjectDefaultName, lifecycle.StoragePoolUpdated.Event(pool.Name(), requestor, ctx))
 
 	return response
 }
@@ -947,7 +968,7 @@ func storagePoolDelete(d *Daemon, r *http.Request) response.Response {
 			}
 
 			for _, vol := range volumes {
-				if vol.Type != db.StoragePoolVolumeTypeNameImage {
+				if vol.Type != dbCluster.StoragePoolVolumeTypeNameImage {
 					return fmt.Errorf("Volume %q of type %q in project %q still exists in storage pool %q", vol.Name, vol.Type, vol.Project, pool.Name())
 				}
 
@@ -1000,7 +1021,7 @@ func storagePoolDelete(d *Daemon, r *http.Request) response.Response {
 	}
 
 	requestor := request.CreateRequestor(r)
-	s.Events.SendLifecycle(project.Default, lifecycle.StoragePoolDeleted.Event(pool.Name(), requestor, nil))
+	s.Events.SendLifecycle(api.ProjectDefaultName, lifecycle.StoragePoolDeleted.Event(pool.Name(), requestor, nil))
 
 	return response.EmptySyncResponse
 }

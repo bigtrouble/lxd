@@ -7,20 +7,23 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/canonical/lxd/lxd/db"
+	"github.com/canonical/lxd/lxd/auth"
+	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 )
 
 var storagePoolVolumeTypeStateCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}/volumes/{type}/{volumeName}/state",
 
-	Get: APIEndpointAction{Handler: storagePoolVolumeTypeStateGet, AccessHandler: allowProjectPermission("storage-volumes", "view")},
+	Get: APIEndpointAction{Handler: storagePoolVolumeTypeStateGet, AccessHandler: allowPermission(entity.TypeStorageVolume, auth.EntitlementCanView, "poolName", "type", "volumeName")},
 }
 
 // swagger:operation GET /1.0/storage-pools/{poolName}/volumes/{type}/{volumeName}/state storage storage_pool_volume_type_state_get
@@ -96,12 +99,13 @@ func storagePoolVolumeTypeStateGet(d *Daemon, r *http.Request) response.Response
 	}
 
 	// Check that the storage volume type is valid.
-	if !shared.ValueInSlice(volumeType, []int{db.StoragePoolVolumeTypeCustom, db.StoragePoolVolumeTypeContainer, db.StoragePoolVolumeTypeVM}) {
+	if !shared.ValueInSlice(volumeType, []int{cluster.StoragePoolVolumeTypeCustom, cluster.StoragePoolVolumeTypeContainer, cluster.StoragePoolVolumeTypeVM}) {
 		return response.BadRequest(fmt.Errorf("Invalid storage volume type %q", volumeTypeName))
 	}
 
 	// Get the storage project name.
-	projectName, err := project.StorageVolumeProject(s.DB.Cluster, projectParam(r), volumeType)
+	requestProjectName := request.ProjectParam(r)
+	projectName, err := project.StorageVolumeProject(s.DB.Cluster, requestProjectName, volumeType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -114,7 +118,7 @@ func storagePoolVolumeTypeStateGet(d *Daemon, r *http.Request) response.Response
 
 	// Fetch the current usage.
 	var usage *storagePools.VolumeUsage
-	if volumeType == db.StoragePoolVolumeTypeCustom {
+	if volumeType == cluster.StoragePoolVolumeTypeCustom {
 		// Custom volumes.
 		usage, err = pool.GetCustomVolumeUsage(projectName, volumeName)
 		if err != nil {

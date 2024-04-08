@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/mux"
 	"golang.org/x/sys/unix"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
@@ -28,15 +29,17 @@ import (
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	storageDrivers "github.com/canonical/lxd/lxd/storage/drivers"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
 
@@ -59,79 +62,86 @@ var apiInternal = []APIEndpoint{
 	internalShutdownCmd,
 	internalSQLCmd,
 	internalWarningCreateCmd,
+	internalIdentityCacheRefreshCmd,
 }
 
 var internalShutdownCmd = APIEndpoint{
 	Path: "shutdown",
 
-	Put: APIEndpointAction{Handler: internalShutdown},
+	Put: APIEndpointAction{Handler: internalShutdown, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalReadyCmd = APIEndpoint{
 	Path: "ready",
 
-	Get: APIEndpointAction{Handler: internalWaitReady},
+	Get: APIEndpointAction{Handler: internalWaitReady, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalContainerOnStartCmd = APIEndpoint{
 	Path: "containers/{instanceRef}/onstart",
 
-	Get: APIEndpointAction{Handler: internalContainerOnStart},
+	Get: APIEndpointAction{Handler: internalContainerOnStart, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalContainerOnStopNSCmd = APIEndpoint{
 	Path: "containers/{instanceRef}/onstopns",
 
-	Get: APIEndpointAction{Handler: internalContainerOnStopNS},
+	Get: APIEndpointAction{Handler: internalContainerOnStopNS, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalContainerOnStopCmd = APIEndpoint{
 	Path: "containers/{instanceRef}/onstop",
 
-	Get: APIEndpointAction{Handler: internalContainerOnStop},
+	Get: APIEndpointAction{Handler: internalContainerOnStop, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalSQLCmd = APIEndpoint{
 	Path: "sql",
 
-	Get:  APIEndpointAction{Handler: internalSQLGet},
-	Post: APIEndpointAction{Handler: internalSQLPost},
+	Get:  APIEndpointAction{Handler: internalSQLGet, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
+	Post: APIEndpointAction{Handler: internalSQLPost, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalGarbageCollectorCmd = APIEndpoint{
 	Path: "gc",
 
-	Get: APIEndpointAction{Handler: internalGC},
+	Get: APIEndpointAction{Handler: internalGC, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalRAFTSnapshotCmd = APIEndpoint{
 	Path: "raft-snapshot",
 
-	Get: APIEndpointAction{Handler: internalRAFTSnapshot},
+	Get: APIEndpointAction{Handler: internalRAFTSnapshot, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalImageRefreshCmd = APIEndpoint{
 	Path: "testing/image-refresh",
 
-	Get: APIEndpointAction{Handler: internalRefreshImage},
+	Get: APIEndpointAction{Handler: internalRefreshImage, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalImageOptimizeCmd = APIEndpoint{
 	Path: "image-optimize",
 
-	Post: APIEndpointAction{Handler: internalOptimizeImage},
+	Post: APIEndpointAction{Handler: internalOptimizeImage, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalWarningCreateCmd = APIEndpoint{
 	Path: "testing/warnings",
 
-	Post: APIEndpointAction{Handler: internalCreateWarning},
+	Post: APIEndpointAction{Handler: internalCreateWarning, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var internalBGPStateCmd = APIEndpoint{
 	Path: "testing/bgp",
 
-	Get: APIEndpointAction{Handler: internalBGPState},
+	Get: APIEndpointAction{Handler: internalBGPState, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
+}
+
+var internalIdentityCacheRefreshCmd = APIEndpoint{
+	Path: "identity-cache-refresh",
+
+	Post: APIEndpointAction{Handler: internalIdentityCacheRefresh, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 type internalImageOptimizePost struct {
@@ -140,12 +150,12 @@ type internalImageOptimizePost struct {
 }
 
 type internalWarningCreatePost struct {
-	Location       string `json:"location"         yaml:"location"`
-	Project        string `json:"project"          yaml:"project"`
-	EntityTypeCode int    `json:"entity_type_code" yaml:"entity_type_code"`
-	EntityID       int    `json:"entity_id"        yaml:"entity_id"`
-	TypeCode       int    `json:"type_code"        yaml:"type_code"`
-	Message        string `json:"message"          yaml:"message"`
+	Location   string      `json:"location"    yaml:"location"`
+	Project    string      `json:"project"     yaml:"project"`
+	EntityType entity.Type `json:"entity_type" yaml:"entity_type"`
+	EntityID   int         `json:"entity_id"   yaml:"entity_id"`
+	TypeCode   int         `json:"type_code"   yaml:"type_code"`
+	Message    string      `json:"message"     yaml:"message"`
 }
 
 // internalCreateWarning creates a warning, and is used for testing only.
@@ -170,16 +180,21 @@ func internalCreateWarning(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	req.EntityTypeCode, _ = reqRaw.GetInt("entity_type_code")
+	entityTypeStr, _ := reqRaw.GetString("entity_type")
 	req.EntityID, _ = reqRaw.GetInt("entity_id")
 
-	// Check if the entity exists, and fail if it doesn't.
-	_, ok := cluster.EntityNames[req.EntityTypeCode]
-	if req.EntityTypeCode != -1 && !ok {
-		return response.SmartError(fmt.Errorf("Invalid entity type"))
+	// If entity type is set, check it is valid and fail if it isn't.
+	if entityTypeStr != "" {
+		req.EntityType = entity.Type(entityTypeStr)
+		err = req.EntityType.Validate()
+		if err != nil {
+			return response.BadRequest(fmt.Errorf("Invalid entity type: %w", err))
+		}
 	}
 
-	err = d.State().DB.Cluster.UpsertWarning(req.Location, req.Project, req.EntityTypeCode, req.EntityID, warningtype.Type(req.TypeCode), req.Message)
+	err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.UpsertWarning(ctx, req.Location, req.Project, req.EntityType, req.EntityID, warningtype.Type(req.TypeCode), req.Message)
+	})
 	if err != nil {
 		return response.SmartError(fmt.Errorf("Failed to create warning: %w", err))
 	}
@@ -232,7 +247,7 @@ func internalWaitReady(d *Daemon, r *http.Request) response.Response {
 }
 
 func internalShutdown(d *Daemon, r *http.Request) response.Response {
-	force := queryParam(r, "force")
+	force := request.QueryParam(r, "force")
 	logger.Info("Asked to shutdown by API", logger.Ctx{"force": force})
 
 	if d.State().ShutdownCtx.Err() != nil {
@@ -259,11 +274,11 @@ func internalShutdown(d *Daemon, r *http.Request) response.Response {
 
 		// Send the response before the LXD daemon process ends.
 		f, ok := w.(http.Flusher)
-		if ok {
-			f.Flush()
-		} else {
+		if !ok {
 			return fmt.Errorf("http.ResponseWriter is not type http.Flusher")
 		}
+
+		f.Flush()
 
 		// Send result of d.Stop() to cmdDaemon so that process stops with correct exit code from Stop().
 		go func() {
@@ -284,7 +299,7 @@ func internalContainerHookLoadFromReference(s *state.State, r *http.Request) (in
 		return nil, err
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 
 	instanceID, err := strconv.Atoi(instanceRef)
 	if err == nil {
@@ -344,12 +359,12 @@ func internalContainerOnStopNS(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	target := queryParam(r, "target")
+	target := request.QueryParam(r, "target")
 	if target == "" {
 		target = "unknown"
 	}
 
-	netns := queryParam(r, "netns")
+	netns := request.QueryParam(r, "netns")
 
 	args := map[string]string{
 		"target": target,
@@ -374,7 +389,7 @@ func internalContainerOnStop(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	target := queryParam(r, "target")
+	target := request.QueryParam(r, "target")
 	if target == "" {
 		target = "unknown"
 	}
@@ -582,7 +597,8 @@ func internalSQLExec(tx *sql.Tx, query string, result *internalSQLResult) error 
 
 // internalImportFromBackup creates instance, storage pool and volume DB records from an instance's backup file.
 // It expects the instance volume to be mounted so that the backup.yaml file is readable.
-func internalImportFromBackup(s *state.State, projectName string, instName string, allowNameOverride bool) error {
+// Also accepts an optional map of device overrides.
+func internalImportFromBackup(s *state.State, projectName string, instName string, allowNameOverride bool, deviceOverrides map[string]map[string]string) error {
 	if instName == "" {
 		return fmt.Errorf("The name of the instance is required")
 	}
@@ -607,7 +623,7 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 	instancePoolName := ""
 	instanceType := instancetype.Container
 	instanceVolType := storageDrivers.VolumeTypeContainer
-	instanceDBVolType := db.StoragePoolVolumeTypeContainer
+	instanceDBVolType := cluster.StoragePoolVolumeTypeContainer
 
 	for _, volType := range []storageDrivers.VolumeType{storageDrivers.VolumeTypeVM, storageDrivers.VolumeTypeContainer} {
 		for _, poolName := range storagePoolNames {
@@ -621,10 +637,10 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 
 				if volType == storageDrivers.VolumeTypeVM {
 					instanceType = instancetype.VM
-					instanceDBVolType = db.StoragePoolVolumeTypeVM
+					instanceDBVolType = cluster.StoragePoolVolumeTypeVM
 				} else {
 					instanceType = instancetype.Container
-					instanceDBVolType = db.StoragePoolVolumeTypeContainer
+					instanceDBVolType = cluster.StoragePoolVolumeTypeContainer
 				}
 			}
 		}
@@ -665,7 +681,7 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 
 	if backupConf.Pool == nil {
 		// We don't know what kind of storage type the pool is.
-		return fmt.Errorf(`No storage pool struct in the backup file found. The storage pool needs to be recovered manually`)
+		return fmt.Errorf("No storage pool struct in the backup file found. The storage pool needs to be recovered manually")
 	}
 
 	// Try to retrieve the storage pool the instance supposedly lives on.
@@ -694,7 +710,7 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 	}
 
 	// Check snapshots are consistent.
-	existingSnapshots, err := pool.CheckInstanceBackupFileSnapshots(backupConf, projectName, false, nil)
+	existingSnapshots, err := pool.CheckInstanceBackupFileSnapshots(backupConf, projectName, nil)
 	if err != nil {
 		return fmt.Errorf("Failed checking snapshots: %w", err)
 	}
@@ -717,8 +733,12 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 		return fmt.Errorf(`Storage volume for instance %q already exists in the database`, backupConf.Container.Name)
 	}
 
-	// Check if an entry for the instance already exists in the db.
-	_, err = s.DB.Cluster.GetInstanceID(projectName, backupConf.Container.Name)
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check if an entry for the instance already exists in the db.
+		_, err := tx.GetInstanceID(ctx, projectName, backupConf.Container.Name)
+
+		return err
+	})
 	if err != nil && !response.IsNotFoundError(err) {
 		return err
 	}
@@ -740,19 +760,27 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 			return fmt.Errorf(`The type %q of the storage volume is not identical to the instance's type %q`, dbVolume.Type, backupConf.Volume.Type)
 		}
 
-		// Remove the storage volume db entry for the instance since force was specified.
-		err := s.DB.Cluster.RemoveStoragePoolVolume(projectName, backupConf.Container.Name, instanceDBVolType, pool.ID())
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Remove the storage volume db entry for the instance since force was specified.
+			return tx.RemoveStoragePoolVolume(ctx, projectName, backupConf.Container.Name, instanceDBVolType, pool.ID())
+		})
 		if err != nil {
 			return err
 		}
 	}
 
-	profiles, err := s.DB.Cluster.GetProfiles(projectName, backupConf.Container.Profiles)
+	var profiles []api.Profile
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		profiles, err = tx.GetProfiles(ctx, projectName, backupConf.Container.Profiles)
+
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Failed loading profiles for instance: %w", err)
 	}
 
-	// Add root device if needed.
+	// Initialise the devices maps.
 	if backupConf.Container.Devices == nil {
 		backupConf.Container.Devices = make(map[string]map[string]string, 0)
 	}
@@ -761,6 +789,17 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 		backupConf.Container.ExpandedDevices = make(map[string]map[string]string, 0)
 	}
 
+	// Apply device overrides.
+	// Do this before calling internalImportRootDevicePopulate so that device overrides are taken into account.
+	resultingDevices, err := shared.ApplyDeviceOverrides(backupConf.Container.Devices, backupConf.Container.ExpandedDevices, deviceOverrides)
+	if err != nil {
+		return err
+	}
+
+	backupConf.Container.Devices = resultingDevices
+
+	// Add root device if needed.
+	// And ensure root device is associated with same pool as instance has been imported to.
 	internalImportRootDevicePopulate(instancePoolName, backupConf.Container.Devices, backupConf.Container.ExpandedDevices, profiles)
 
 	revert := revert.New()
@@ -797,8 +836,12 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 	for _, snap := range existingSnapshots {
 		snapInstName := fmt.Sprintf("%s%s%s", backupConf.Container.Name, shared.SnapshotDelimiter, snap.Name)
 
-		// Check if an entry for the snapshot already exists in the db.
-		_, snapErr := s.DB.Cluster.GetInstanceSnapshotID(projectName, backupConf.Container.Name, snap.Name)
+		snapErr := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Check if an entry for the snapshot already exists in the db.
+			_, err := tx.GetInstanceSnapshotID(ctx, projectName, backupConf.Container.Name, snap.Name)
+
+			return err
+		})
 		if snapErr != nil && !response.IsNotFoundError(snapErr) {
 			return snapErr
 		}
@@ -826,20 +869,6 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 			return fmt.Errorf(`Storage volume for snapshot %q already exists in the database`, snapInstName)
 		}
 
-		if snapErr == nil {
-			err := s.DB.Cluster.DeleteInstance(projectName, snapInstName)
-			if err != nil {
-				return err
-			}
-		}
-
-		if dbVolume != nil {
-			err := s.DB.Cluster.RemoveStoragePoolVolume(projectName, snapInstName, instanceDBVolType, pool.ID())
-			if err != nil {
-				return err
-			}
-		}
-
 		baseImage := snap.Config["volatile.base_image"]
 
 		arch, err := osarch.ArchitectureId(snap.Architecture)
@@ -847,7 +876,11 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 			return err
 		}
 
-		profiles, err := s.DB.Cluster.GetProfiles(projectName, snap.Profiles)
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			profiles, err = tx.GetProfiles(ctx, projectName, snap.Profiles)
+
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("Failed loading profiles for instance snapshot %q: %w", snapInstName, err)
 		}
@@ -883,7 +916,7 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 		}
 
 		revert.Add(cleanup)
-		defer snapInstOp.Done(err)
+		defer snapInstOp.Done(err) //nolint:revive
 
 		// Recreate missing mountpoints and symlinks.
 		volStorageName := project.Instance(projectName, snapInstName)
@@ -907,7 +940,7 @@ func internalImportFromBackup(s *state.State, projectName string, instName strin
 // device will be added, if the root disk config in the current profiles matches the effective backup.yaml config.
 func internalImportRootDevicePopulate(instancePoolName string, localDevices map[string]map[string]string, expandedDevices map[string]map[string]string, profiles []api.Profile) {
 	// First, check if localDevices from backup.yaml has a root disk.
-	rootName, _, _ := shared.GetRootDiskDevice(localDevices)
+	rootName, _, _ := instancetype.GetRootDiskDevice(localDevices)
 	if rootName != "" {
 		localDevices[rootName]["pool"] = instancePoolName
 
@@ -915,11 +948,11 @@ func internalImportRootDevicePopulate(instancePoolName string, localDevices map[
 	}
 
 	// Next check if expandedDevices from backup.yaml has a root disk.
-	expandedRootName, expandedRootConfig, _ := shared.GetRootDiskDevice(expandedDevices)
+	expandedRootName, expandedRootConfig, _ := instancetype.GetRootDiskDevice(expandedDevices)
 
 	// Extract root disk from expanded profile devices.
-	profileExpandedDevices := db.ExpandInstanceDevices(deviceConfig.NewDevices(localDevices), profiles)
-	profileExpandedRootName, profileExpandedRootConfig, _ := shared.GetRootDiskDevice(profileExpandedDevices.CloneNative())
+	profileExpandedDevices := instancetype.ExpandInstanceDevices(deviceConfig.NewDevices(localDevices), profiles)
+	profileExpandedRootName, profileExpandedRootConfig, _ := instancetype.GetRootDiskDevice(profileExpandedDevices.CloneNative())
 
 	// Record whether we need to add a new local disk device.
 	addLocalDisk := false
@@ -1022,4 +1055,10 @@ func internalBGPState(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
 	return response.SyncResponse(true, s.BGP.Debug())
+}
+
+func internalIdentityCacheRefresh(d *Daemon, r *http.Request) response.Response {
+	logger.Debug("Received identity cache update notification - refreshing cache")
+	d.State().UpdateIdentityCache()
+	return response.EmptySyncResponse
 }

@@ -6,16 +6,16 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	pcidev "github.com/canonical/lxd/lxd/device/pci"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/resources"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 var gpuMdevMu sync.Mutex
@@ -124,7 +124,7 @@ func (d *gpuMdev) startVM() (*deviceConfig.RunConfig, error) {
 
 		// Create the vGPU.
 		if mdevUUID == "" || !shared.PathExists(fmt.Sprintf("/sys/bus/pci/devices/%s/%s", pciAddress, mdevUUID)) {
-			mdevUUID = uuid.New()
+			mdevUUID = uuid.New().String()
 
 			err = os.WriteFile(filepath.Join(fmt.Sprintf("/sys/bus/pci/devices/%s/mdev_supported_types/%s/create", pciAddress, d.config["mdev"])), []byte(mdevUUID), 0200)
 			if err != nil {

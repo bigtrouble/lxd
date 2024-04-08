@@ -34,7 +34,7 @@ However, note that when you specify the `network` option, the `nictype` option i
   When using this method, LXD derives the `nictype` option automatically.
   The value is read-only and cannot be changed.
 
-  Other device options that are inherited from the network are marked with a "yes" in the "Managed" column of the NIC-specific tables of device options.
+  Other device options that are inherited from the network are marked with a "yes" in the "Managed" field of the NIC-specific device options.
   You cannot customize these options directly for the NIC if you're using the `network` method.
 
 See {ref}`networks` for more information.
@@ -59,7 +59,7 @@ The following NICs can be added using only the `nictype` option:
 - [`p2p`](nic-p2p): Creates a virtual device pair, putting one side in the instance and leaving the other side on the host.
 - [`routed`](nic-routed): Creates a virtual device pair to connect the host to the instance and sets up static routes and proxy ARP/NDP entries to allow the instance to join the network of a designated parent interface.
 
-The available device options depend on the NIC type and are listed in the tables in the following sections.
+The available device options depend on the NIC type and are listed in the following sections.
 
 (nic-bridged)=
 ### `nictype`: `bridged`
@@ -74,34 +74,26 @@ A `bridged` NIC uses an existing bridge on the host and creates a virtual device
 
 NIC devices of type `bridged` have the following device options:
 
-Key                      | Type    | Default           | Managed | Description
-:--                      | :--     | :--               | :--     | :--
-`boot.priority`          | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`host_name`              | string  | randomly assigned | no      | The name of the interface inside the host
-`hwaddr`                 | string  | randomly assigned | no      | The MAC address of the new interface
-`ipv4.address`           | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP (can be `none` to restrict all IPv4 traffic when `security.ipv4_filtering` is set)
-`ipv4.routes`            | string  | -                 | no      | Comma-delimited list of IPv4 static routes to add on host to NIC
-`ipv4.routes.external`   | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC and publish on uplink network (BGP)
-`ipv6.address`           | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP (can be `none` to restrict all IPv6 traffic when `security.ipv6_filtering` is set)
-`ipv6.routes`            | string  | -                 | no      | Comma-delimited list of IPv6 static routes to add on host to NIC
-`ipv6.routes.external`   | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC and publish on uplink network (BGP)
-`limits.egress`          | string  | -                 | no      | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.ingress`         | string  | -                 | no      | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.max`             | string  | -                 | no      | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
-`limits.priority`        | integer | -                 | no      | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
-`maas.subnet.ipv4`       | string  | -                 | yes     | MAAS IPv4 subnet to register the instance in
-`maas.subnet.ipv6`       | string  | -                 | yes     | MAAS IPv6 subnet to register the instance in
-`mtu`                    | integer | parent MTU        | yes     | The MTU of the new interface
-`name`                   | string  | kernel assigned   | no      | The name of the interface inside the instance
-`network`                | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
-`parent`                 | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
-`queue.tx.length`        | integer | -                 | no      | The transmit queue length for the NIC
-`security.ipv4_filtering`| bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv4 address (enables `security.mac_filtering`)
-`security.ipv6_filtering`| bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv6 address (enables `security.mac_filtering`)
-`security.mac_filtering` | bool    | `false`           | no      | Prevent the instance from spoofing another instance's MAC address
-`security.port_isolation`| bool    | `false`           | no      | Prevent the NIC from communicating with other NICs in the network that have port isolation enabled
-`vlan`                   | integer | -                 | no      | The VLAN ID to use for non-tagged traffic (can be `none` to remove port from default VLAN)
-`vlan.tagged`            | integer | -                 | no      | Comma-delimited list of VLAN IDs or VLAN ranges to join for tagged traffic
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-bridged-device-conf start -->
+    :end-before: <!-- config group device-nic-bridged-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `bridged` network device to an instance, connecting to a LXD managed network:
+
+    lxc network create <network_name> --type=bridge
+    lxc config device add <instance_name> <device_name> nic network=<network_name>
+
+Note that `bridge` is the type when creating a managed bridge network, while the device `nictype` that is required when connecting to an unmanaged bridge is `bridged`.
+
+Add a `bridged` network device to an instance, connecting to an existing bridge interface with `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=bridged parent=<existing_bridge>
+
+See {ref}`network-create` and {ref}`instances-configure-devices` for more information.
 
 (nic-macvlan)=
 ### `nictype`: `macvlan`
@@ -119,18 +111,24 @@ Both the host and the instances can talk to the gateway, but they cannot communi
 
 NIC devices of type `macvlan` have the following device options:
 
-Key                     | Type    | Default           | Managed | Description
-:--                     | :--     | :--               | :--     | :--
-`boot.priority`         | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`gvrp`                  | bool    | `false`           | no      | Register VLAN using GARP VLAN Registration Protocol
-`hwaddr`                | string  | randomly assigned | no      | The MAC address of the new interface
-`maas.subnet.ipv4`      | string  | -                 | yes     | MAAS IPv4 subnet to register the instance in
-`maas.subnet.ipv6`      | string  | -                 | yes     | MAAS IPv6 subnet to register the instance in
-`mtu`                   | integer | parent MTU        | yes     | The MTU of the new interface
-`name`                  | string  | kernel assigned   | no      | The name of the interface inside the instance
-`network`               | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
-`parent`                | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
-`vlan`                  | integer | -                 | no      | The VLAN ID to attach to
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-macvlan-device-conf start -->
+    :end-before: <!-- config group device-nic-macvlan-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `macvlan` network device to an instance, connecting to a LXD managed network:
+
+    lxc network create <network_name> --type=macvlan parent=<existing_NIC>
+    lxc config device add <instance_name> <device_name> nic network=<network_name>
+
+Add a `macvlan` network device to an instance, connecting to an existing network interface with `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=macvlan parent=<existing_NIC>
+
+See {ref}`network-create` and {ref}`instances-configure-devices` for more information.
 
 (nic-sriov)=
 ### `nictype`: `sriov`
@@ -164,18 +162,55 @@ VF allocation
 
 NIC devices of type `sriov` have the following device options:
 
-Key                     | Type    | Default           | Managed | Description
-:--                     | :--     | :--               | :--     | :--
-`boot.priority`         | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`hwaddr`                | string  | randomly assigned | no      | The MAC address of the new interface
-`maas.subnet.ipv4`      | string  | -                 | yes     | MAAS IPv4 subnet to register the instance in
-`maas.subnet.ipv6`      | string  | -                 | yes     | MAAS IPv6 subnet to register the instance in
-`mtu`                   | integer | kernel assigned   | yes     | The MTU of the new interface
-`name`                  | string  | kernel assigned   | no      | The name of the interface inside the instance
-`network`               | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
-`parent`                | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
-`security.mac_filtering`| bool    | `false`           | no      | Prevent the instance from spoofing another instance's MAC address
-`vlan`                  | integer | -                 | no      | The VLAN ID to attach to
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-sriov-device-conf start -->
+    :end-before: <!-- config group device-nic-sriov-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `sriov` network device to an instance, connecting to a LXD managed network:
+
+    lxc network create <network_name> --type=sriov parent=<sriov_enabled_NIC>
+    lxc config device add <instance_name> <device_name> nic network=<network_name>
+
+Add a `sriov` network device to an instance, connecting to an existing SR-IOV-enabled interface with `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=sriov parent=<sriov_enabled_NIC>
+
+See {ref}`network-create` and {ref}`instances-configure-devices` for more information.
+
+(nic-physical)=
+### `nictype`: `physical`
+
+```{note}
+- You can select this NIC type through the `nictype` option or the `network` option (see {ref}`network-physical` for information about the managed `physical` network).
+- You can have only one `physical` NIC for each parent device.
+```
+
+A `physical` NIC provides straight physical device pass-through from the host.
+The targeted device will vanish from the host and appear in the instance (which means that you can have only one `physical` NIC for each targeted device).
+
+#### Device options
+
+NIC devices of type `physical` have the following device options:
+
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-physical-device-conf start -->
+    :end-before: <!-- config group device-nic-physical-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `physical` network device to an instance, connecting to an existing physical network interface with `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=physical parent=<physical_NIC>
+
+Adding a `physical` network device to an instance using a managed network is not possible, because the `physical` managed network type is intended to be used only with OVN networks.
+
+See {ref}`instances-configure-devices` for more information.
 
 (nic-ovn)=
 ### `nictype`: `ovn`
@@ -228,55 +263,21 @@ VDPA hardware acceleration
 
 NIC devices of type `ovn` have the following device options:
 
-Key                                   | Type    | Default           | Managed | Description
-:--                                   | :--     | :--               | :--     | :--
-`acceleration`                        | string  | `none`            | no      | Enable hardware offloading (either `none`, `sriov` or `vdpa`, see {ref}`devices-nic-hw-acceleration`)
-`boot.priority`                       | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`host_name`                           | string  | randomly assigned | no      | The name of the interface inside the host
-`hwaddr`                              | string  | randomly assigned | no      | The MAC address of the new interface
-`ipv4.address`                        | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP
-`ipv4.routes`                         | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC
-`ipv4.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC and publish on uplink network
-`ipv6.address`                        | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP
-`ipv6.routes`                         | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC
-`ipv6.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC and publish on uplink network
-`name`                                | string  | kernel assigned   | no      | The name of the interface inside the instance
-`nested`                              | string  | -                 | no      | The parent NIC name to nest this NIC under (see also `vlan`)
-`network`                             | string  | -                 | yes     | The managed network to link the device to (required)
-`security.acls`                       | string  | -                 | no      | Comma-separated list of network ACLs to apply
-`security.acls.default.egress.action` | string  | `reject`          | no      | Action to use for egress traffic that doesn't match any ACL rule
-`security.acls.default.egress.logged` | bool    | `false`           | no      | Whether to log egress traffic that doesn't match any ACL rule
-`security.acls.default.ingress.action`| string  | `reject`          | no      | Action to use for ingress traffic that doesn't match any ACL rule
-`security.acls.default.ingress.logged`| bool    | `false`           | no      | Whether to log ingress traffic that doesn't match any ACL rule
-`vlan`                                | integer | -                 | no      | The VLAN ID to use when nesting (see also `nested`)
-
-(nic-physical)=
-### `nictype`: `physical`
-
-```{note}
-- You can select this NIC type through the `nictype` option or the `network` option (see {ref}`network-physical` for information about the managed `physical` network).
-- You can have only one `physical` NIC for each parent device.
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-ovn-device-conf start -->
+    :end-before: <!-- config group device-nic-ovn-device-conf end -->
 ```
 
-A `physical` NIC provides straight physical device pass-through from the host.
-The targeted device will vanish from the host and appear in the instance (which means that you can have only one `physical` NIC for each targeted device).
+#### Configuration examples
 
-#### Device options
+An `ovn` network device must be added using a managed network.
+To do so:
 
-NIC devices of type `physical` have the following device options:
+    lxc network create <network_name> --type=ovn network=<parent_network>
+    lxc config device add <instance_name> <device_name> nic network=<network_name>
 
-Key                     | Type    | Default           | Managed | Description
-:--                     | :--     | :--               | :--     | :--
-`boot.priority`         | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`gvrp`                  | bool    | `false`           | no      | Register VLAN using GARP VLAN Registration Protocol
-`hwaddr`                | string  | randomly assigned | no      | The MAC address of the new interface
-`maas.subnet.ipv4`      | string  | -                 | no      | MAAS IPv4 subnet to register the instance in
-`maas.subnet.ipv6`      | string  | -                 | no      | MAAS IPv6 subnet to register the instance in
-`mtu`                   | integer | parent MTU        | no      | The MTU of the new interface
-`name`                  | string  | kernel assigned   | no      | The name of the interface inside the instance
-`network`               | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
-`parent`                | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
-`vlan`                  | integer | -                 | no      | The VLAN ID to attach to
+See {ref}`network-ovn-setup` for full instructions, and {ref}`network-create` and {ref}`instances-configure-devices` for more information.
 
 (nic-ipvlan)=
 ### `nictype`: `ipvlan`
@@ -316,21 +317,22 @@ DNS
 
 NIC devices of type `ipvlan` have the following device options:
 
-Key                     | Type    | Default            | Description
-:--                     | :--     | :--                | :--
-`gvrp`                  | bool    | `false`            | Register VLAN using GARP VLAN Registration Protocol
-`hwaddr`                | string  | randomly assigned  | The MAC address of the new interface
-`ipv4.address`          | string  | -                  | Comma-delimited list of IPv4 static addresses to add to the instance (in `l2` mode, these can be specified as CIDR values or singular addresses using a subnet of `/24`)
-`ipv4.gateway`          | string  | `auto` (`l3s`), - (`l2`) | In `l3s` mode, whether to add an automatic default IPv4 gateway (can be `auto` or `none`); in `l2` mode, the IPv4 address of the gateway
-`ipv4.host_table`       | integer | -                  | The custom policy routing table ID to add IPv4 static routes to (in addition to the main routing table)
-`ipv6.address`          | string  | -                  | Comma-delimited list of IPv6 static addresses to add to the instance (in `l2` mode, these can be specified as CIDR values or singular addresses using a subnet of `/64`)
-`ipv6.gateway`          | string  | `auto` (`l3s`), - (`l2`) | In `l3s` mode, whether to add an automatic default IPv6 gateway (can be `auto` or `none`); in `l2` mode, the IPv6 address of the gateway
-`ipv6.host_table`       | integer | -                  | The custom policy routing table ID to add IPv6 static routes to (in addition to the main routing table)
-`mode`                  | string  | `l3s`              | The IPVLAN mode (either `l2` or `l3s`)
-`mtu`                   | integer | parent MTU         | The MTU of the new interface
-`name`                  | string  | kernel assigned    | The name of the interface inside the instance
-`parent`                | string  | -                  | The name of the host device (required)
-`vlan`                  | integer | -                  | The VLAN ID to attach to
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-ipvlan-device-conf start -->
+    :end-before: <!-- config group device-nic-ipvlan-device-conf end -->
+```
+
+#### Configuration examples
+
+Add an `ipvlan` network device to an instance, connecting to an existing network interface with `nictype`:
+
+    lxc stop <instance_name>
+    lxc config device add <instance_name> <device_name> nic nictype=ipvlan parent=<existing_NIC>
+
+Adding an `ipvlan` network device to an instance using a managed network is not possible.
+
+See {ref}`instances-configure-devices` for more information.
 
 (nic-p2p)=
 ### `nictype`: `p2p`
@@ -345,20 +347,21 @@ A `p2p` NIC creates a virtual device pair, putting one side in the instance and 
 
 NIC devices of type `p2p` have the following device options:
 
-Key                     | Type    | Default           | Description
-:--                     | :--     | :--               | :--
-`boot.priority`         | integer | -                 | Boot priority for VMs (higher value boots first)
-`host_name`             | string  | randomly assigned | The name of the interface inside the host
-`hwaddr`                | string  | randomly assigned | The MAC address of the new interface
-`ipv4.routes`           | string  | -                 | Comma-delimited list of IPv4 static routes to add on host to NIC
-`ipv6.routes`           | string  | -                 | Comma-delimited list of IPv6 static routes to add on host to NIC
-`limits.egress`         | string  | -                 | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.ingress`        | string  | -                 | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.max`            | string  | -                 | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
-`limits.priority`       | integer | -                 | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
-`mtu`                   | integer | kernel assigned   | The MTU of the new interface
-`name`                  | string  | kernel assigned   | The name of the interface inside the instance
-`queue.tx.length`       | integer | -                 | The transmit queue length for the NIC
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-p2p-device-conf start -->
+    :end-before: <!-- config group device-nic-p2p-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `p2p` network device to an instance using `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=p2p
+
+Adding a `p2p` network device to an instance using a managed network is not possible.
+
+See {ref}`instances-configure-devices` for more information.
 
 (nic-routed)=
 ### `nictype`: `routed`
@@ -399,6 +402,7 @@ Multiple IP addresses
   In this case, set the `ipv4.gateway` and `ipv6.gateway` values to `none` on any subsequent interfaces to avoid default gateway conflicts.
   Also consider specifying a different host-side address for these subsequent interfaces using `ipv4.host_address` and/or `ipv6.host_address`.
 
+(nic-routed-parent)=
 Parent interface
 : This NIC can operate with and without a `parent` network interface set.
 
@@ -424,32 +428,21 @@ Parent interface
 
 NIC devices of type `routed` have the following device options:
 
-Key                     | Type    | Default           | Description
-:--                     | :--     | :--               | :--
-`gvrp`                  | bool    | `false`           | Register VLAN using GARP VLAN Registration Protocol
-`host_name`             | string  | randomly assigned | The name of the interface inside the host
-`hwaddr`                | string  | randomly assigned | The MAC address of the new interface
-`ipv4.address`          | string  | -                 | Comma-delimited list of IPv4 static addresses to add to the instance
-`ipv4.gateway`          | string  | `auto`            | Whether to add an automatic default IPv4 gateway (can be `auto` or `none`)
-`ipv4.host_address`     | string  | `169.254.0.1`     | The IPv4 address to add to the host-side `veth` interface
-`ipv4.host_table`       | integer | -                 | The custom policy routing table ID to add IPv4 static routes to (in addition to the main routing table)
-`ipv4.neighbor_probe`   | bool    | `true`            | Whether to probe the parent network for IP address availability
-`ipv4.routes`           | string  | -                 | Comma-delimited list of IPv4 static routes to add on host to NIC (without L2 ARP/NDP proxy)
-`ipv6.address`          | string  | -                 | Comma-delimited list of IPv6 static addresses to add to the instance
-`ipv6.gateway`          | string  | `auto`            | Whether to add an automatic default IPv6 gateway (can be `auto` or `none`)
-`ipv6.host_address`     | string  | `fe80::1`         | The IPv6 address to add to the host-side `veth` interface
-`ipv6.host_table`       | integer | -                 | The custom policy routing table ID to add IPv6 static routes to (in addition to the main routing table)
-`ipv6.neighbor_probe`   | bool    | `true`            | Whether to probe the parent network for IP address availability
-`ipv6.routes`           | string  | -                 | Comma-delimited list of IPv6 static routes to add on host to NIC (without L2 ARP/NDP proxy)
-`limits.egress`         | string  | -                 | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.ingress`        | string  | -                 | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.max`            | string  | -                 | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
-`limits.priority`       | integer | -                 | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
-`mtu`                   | integer | parent MTU        | The MTU of the new interface
-`name`                  | string  | kernel assigned   | The name of the interface inside the instance
-`parent`                | string  | -                 | The name of the host device to join the instance to
-`queue.tx.length`       | integer | -                 | The transmit queue length for the NIC
-`vlan`                  | integer | -                 | The VLAN ID to attach to
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group device-nic-routed-device-conf start -->
+    :end-before: <!-- config group device-nic-routed-device-conf end -->
+```
+
+#### Configuration examples
+
+Add a `routed` network device to an instance using `nictype`:
+
+    lxc config device add <instance_name> <device_name> nic nictype=routed ipv4.address=192.0.2.2 ipv6.address=2001:db8::2
+
+Adding a `routed` network device to an instance using a managed network is not possible.
+
+See {ref}`instances-configure-devices` for more information.
 
 ## `bridged`, `macvlan` or `ipvlan` for connection to physical network
 
@@ -470,7 +463,7 @@ A bridge also lets you use MAC filtering and I/O limits, which cannot be applied
 
 If you're using MAAS to manage the physical network under your LXD host and want to attach your instances directly to a MAAS-managed network, LXD can be configured to interact with MAAS so that it can track your instances.
 
-At the daemon level, you must configure `maas.api.url` and `maas.api.key`, and then set the `maas.subnet.ipv4` and/or `maas.subnet.ipv6` keys on the instance or profile's `nic` entry.
+At the daemon level, you must configure {config:option}`server-miscellaneous:maas.api.url` and {config:option}`server-miscellaneous:maas.api.key`, and then set the NIC-specific `maas.subnet.ipv4` and/or `maas.subnet.ipv6` keys on the instance or profile's `nic` entry.
 
 With this configuration, LXD registers all your instances with MAAS, giving them proper DHCP leases and DNS records.
 

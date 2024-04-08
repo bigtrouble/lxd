@@ -12,18 +12,19 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/db/warningtype"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/lxd/task"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/filter"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
@@ -32,16 +33,16 @@ import (
 var warningsCmd = APIEndpoint{
 	Path: "warnings",
 
-	Get: APIEndpointAction{Handler: warningsGet},
+	Get: APIEndpointAction{Handler: warningsGet, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 var warningCmd = APIEndpoint{
 	Path: "warnings/{id}",
 
-	Get:    APIEndpointAction{Handler: warningGet},
-	Patch:  APIEndpointAction{Handler: warningPatch},
-	Put:    APIEndpointAction{Handler: warningPut},
-	Delete: APIEndpointAction{Handler: warningDelete},
+	Get:    APIEndpointAction{Handler: warningGet, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
+	Patch:  APIEndpointAction{Handler: warningPatch, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
+	Put:    APIEndpointAction{Handler: warningPut, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
+	Delete: APIEndpointAction{Handler: warningDelete, AccessHandler: allowPermission(entity.TypeServer, auth.EntitlementCanEdit)},
 }
 
 func filterWarnings(warnings []api.Warning, clauses *filter.ClauseSet) ([]api.Warning, error) {
@@ -168,7 +169,7 @@ func warningsGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Parse the project field
-	projectName := queryParam(r, "project")
+	projectName := request.QueryParam(r, "project")
 
 	var warnings []api.Warning
 	err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
@@ -388,9 +389,9 @@ func warningPut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if status == warningtype.StatusAcknowledged {
-		s.Events.SendLifecycle(project.Default, lifecycle.WarningAcknowledged.Event(id, request.CreateRequestor(r), nil))
+		s.Events.SendLifecycle(api.ProjectDefaultName, lifecycle.WarningAcknowledged.Event(id, request.CreateRequestor(r), nil))
 	} else {
-		s.Events.SendLifecycle(project.Default, lifecycle.WarningReset.Event(id, request.CreateRequestor(r), nil))
+		s.Events.SendLifecycle(api.ProjectDefaultName, lifecycle.WarningReset.Event(id, request.CreateRequestor(r), nil))
 	}
 
 	return response.EmptySyncResponse
@@ -430,7 +431,7 @@ func warningDelete(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	s.Events.SendLifecycle(project.Default, lifecycle.WarningDeleted.Event(id, request.CreateRequestor(r), nil))
+	s.Events.SendLifecycle(api.ProjectDefaultName, lifecycle.WarningDeleted.Event(id, request.CreateRequestor(r), nil))
 
 	return response.EmptySyncResponse
 }
@@ -502,80 +503,14 @@ func pruneResolvedWarnings(ctx context.Context, s *state.State) error {
 
 // getWarningEntityURL fetches the entity corresponding to the warning from the database, and generates a URL.
 func getWarningEntityURL(ctx context.Context, tx *sql.Tx, warning *cluster.Warning) (string, error) {
-	if warning.EntityID == -1 || warning.EntityTypeCode == -1 {
+	if warning.EntityID == -1 || warning.EntityType == "" {
 		return "", nil
 	}
 
-	_, ok := cluster.EntityNames[warning.EntityTypeCode]
-	if !ok {
-		return "", fmt.Errorf("Unknown entity type")
+	u, err := cluster.GetEntityURL(ctx, tx, entity.Type(warning.EntityType), warning.EntityID)
+	if err != nil {
+		return "", fmt.Errorf("Failed to get warning entity URL: %w", err)
 	}
 
-	var url string
-	switch warning.EntityTypeCode {
-	case cluster.TypeImage:
-		entities, err := cluster.GetImages(ctx, tx, cluster.ImageFilter{ID: &warning.EntityID})
-		if err != nil {
-			return "", err
-		}
-
-		if len(entities) == 0 {
-			return "", db.ErrUnknownEntityID
-		}
-
-		apiImage := api.Image{Fingerprint: entities[0].Fingerprint}
-		url = apiImage.URL(version.APIVersion, entities[0].Project).String()
-	case cluster.TypeProfile:
-		entities, err := cluster.GetProfiles(ctx, tx, cluster.ProfileFilter{ID: &warning.EntityID})
-		if err != nil {
-			return "", err
-		}
-
-		if len(entities) == 0 {
-			return "", db.ErrUnknownEntityID
-		}
-
-		apiProfile := api.Profile{Name: entities[0].Name}
-		url = apiProfile.URL(version.APIVersion, entities[0].Project).String()
-	case cluster.TypeProject:
-		entities, err := cluster.GetProjects(ctx, tx, cluster.ProjectFilter{ID: &warning.EntityID})
-		if err != nil {
-			return "", err
-		}
-
-		if len(entities) == 0 {
-			return "", db.ErrUnknownEntityID
-		}
-
-		apiProject := api.Project{Name: entities[0].Name}
-		url = apiProject.URL(version.APIVersion).String()
-	case cluster.TypeCertificate:
-		entities, err := cluster.GetCertificates(ctx, tx, cluster.CertificateFilter{ID: &warning.EntityID})
-		if err != nil {
-			return "", err
-		}
-
-		if len(entities) == 0 {
-			return "", db.ErrUnknownEntityID
-		}
-
-		apiCertificate := api.Certificate{Fingerprint: entities[0].Fingerprint}
-		url = apiCertificate.URL(version.APIVersion).String()
-	case cluster.TypeContainer:
-		fallthrough
-	case cluster.TypeInstance:
-		entities, err := cluster.GetInstances(ctx, tx, cluster.InstanceFilter{ID: &warning.EntityID})
-		if err != nil {
-			return "", err
-		}
-
-		if len(entities) == 0 {
-			return "", db.ErrUnknownEntityID
-		}
-
-		apiInstance := api.Instance{Name: entities[0].Name}
-		url = apiInstance.URL(version.APIVersion, entities[0].Project).String()
-	}
-
-	return url, nil
+	return u.String(), nil
 }

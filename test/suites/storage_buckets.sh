@@ -85,6 +85,9 @@ test_storage_buckets() {
   initSecretKey=$(echo "${initCreds}" | awk '{ if ($2 == "secret" && $3 == "key:") {print $4}}')
   s3cmdrun "${lxd_backend}" "${initAccessKey}" "${initSecretKey}" ls | grep -F "${bucketPrefix}.foo"
 
+  # Check if the storage bucket has an UUID.
+  [ -n "$(lxc storage bucket get "${poolName}" "${bucketPrefix}.foo" volatile.uuid)" ]
+
   lxc storage bucket list "${poolName}" | grep -F "${bucketPrefix}.foo"
   lxc storage bucket show "${poolName}" "${bucketPrefix}.foo"
 
@@ -115,7 +118,7 @@ test_storage_buckets() {
 
   # Test putting a file into a bucket.
   lxdTestFile="bucketfile_${bucketPrefix}.txt"
-  head -c 2M /dev/urandom > "${lxdTestFile}"
+  head -c 5M /dev/urandom > "${lxdTestFile}"
   s3cmdrun "${lxd_backend}" "${adAccessKey}" "${adSecretKey}" put "${lxdTestFile}" "s3://${bucketPrefix}.foo"
   ! s3cmdrun "${lxd_backend}" "${roAccessKey}" "${roSecretKey}" put "${lxdTestFile}" "s3://${bucketPrefix}.foo" || false
 

@@ -18,7 +18,6 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/lxd/util"
-	"github.com/canonical/lxd/lxd/vsock"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/logger"
 )
@@ -136,31 +135,6 @@ func (c *cmdAgent) Run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Failed to start HTTP server: %w", err)
 	}
 
-	// Check context ID periodically, and restart the HTTP server if needed.
-	go func() {
-		for range time.Tick(30 * time.Second) {
-			cid, err := vsock.ContextID()
-			if err != nil {
-				continue
-			}
-
-			if d.localCID == cid {
-				continue
-			}
-
-			// Restart server
-			servers["http"].Close()
-
-			err = startHTTPServer(d, c.global.flagLogDebug)
-			if err != nil {
-				errChan <- err
-			}
-
-			// Update context ID.
-			d.localCID = cid
-		}
-	}()
-
 	// Check whether we should start the devlxd server in the early setup. This way, /dev/lxd/sock
 	// will be available for any systemd services starting after the lxd-agent.
 	if shared.PathExists("agent.conf") {
@@ -263,8 +237,8 @@ func (c *cmdAgent) startStatusNotifier(ctx context.Context, chConnected <-chan s
 
 // writeStatus writes a status code to the vserial ring buffer used to detect agent status on host.
 func (c *cmdAgent) writeStatus(status string) error {
-	if shared.PathExists("/dev/virtio-ports/org.linuxcontainers.lxd") {
-		vSerial, err := os.OpenFile("/dev/virtio-ports/org.linuxcontainers.lxd", os.O_RDWR, 0600)
+	if shared.PathExists("/dev/virtio-ports/com.canonical.lxd") {
+		vSerial, err := os.OpenFile("/dev/virtio-ports/com.canonical.lxd", os.O_RDWR, 0600)
 		if err != nil {
 			return err
 		}

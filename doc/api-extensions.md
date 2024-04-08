@@ -7,7 +7,7 @@ looking at the `api_extensions` field in `GET /1.0`.
 
 ## `storage_zfs_remove_snapshots`
 
-A `storage.zfs_remove_snapshots` daemon configuration key was introduced.
+A {config:option}`storage-zfs-volume-conf:zfs.remove_snapshots` daemon configuration key was introduced.
 
 It's a Boolean that defaults to `false` and that when set to `true` instructs LXD
 to remove any needed snapshot when attempting to restore another.
@@ -16,7 +16,7 @@ This is needed as ZFS will only let you restore the latest snapshot.
 
 ## `container_host_shutdown_timeout`
 
-A `boot.host_shutdown_timeout` container configuration key was introduced.
+A {config:option}`instance-boot:boot.host_shutdown_timeout` container configuration key was introduced.
 
 It's an integer which indicates how long LXD should wait for the container
 to stop before killing it.
@@ -25,7 +25,7 @@ Its value is only used on clean LXD daemon shutdown. It defaults to 30s.
 
 ## `container_stop_priority`
 
-A `boot.stop.priority` container configuration key was introduced.
+A {config:option}`instance-boot:boot.stop.priority` container configuration key was introduced.
 
 It's an integer which indicates the priority of a container during shutdown.
 
@@ -37,12 +37,19 @@ Containers with the same priority will shutdown in parallel.  It defaults to 0.
 
 A number of new syscalls related container configuration keys were introduced.
 
-* `security.syscalls.blacklist_default` <!-- wokeignore:rule=blacklist -->
-* `security.syscalls.blacklist_compat` <!-- wokeignore:rule=blacklist -->
-* `security.syscalls.blacklist` <!-- wokeignore:rule=blacklist -->
-* `security.syscalls.whitelist` <!-- wokeignore:rule=whitelist -->
+* {config:option}`instance-security:security.syscalls.deny_default`
+* {config:option}`instance-security:security.syscalls.deny_compat`
+* {config:option}`instance-security:security.syscalls.deny`
+* {config:option}`instance-security:security.syscalls.allow`
 
 See [Instance configuration](instance-config) for how to use them.
+
+```{note}
+Initially, those configuration keys were (accidentally) introduced with
+offensive names. They have since been renamed
+(`container_syscall_filtering_allow_deny_syntax`), and the old names are no
+longer accepted.
+```
 
 ## `auth_pki`
 
@@ -96,13 +103,13 @@ flag to each XHR Request).
 
 Some browsers like Firefox and Safari can't accept server response without
 `Access-Control-Allow-Credentials: true` header. To ensure that the server will
-return a response with that header, set `core.https_allowed_credentials=true`.
+return a response with that header, set {config:option}`server-core:core.https_allowed_credentials` to `true`.
 
 ## `image_compression_algorithm`
 
 This adds support for a `compression_algorithm` property when creating an image (`POST /1.0/images`).
 
-Setting this property overrides the server default value (`images.compression_algorithm`).
+Setting this property overrides the server default value ({config:option}`server-images:images.compression_algorithm`).
 
 ## `directory_manipulation`
 
@@ -116,7 +123,7 @@ This adds support for retrieving CPU time for a running container.
 
 ## `storage_zfs_use_refquota`
 
-Introduces a new server property `storage.zfs_use_refquota` which instructs LXD
+Introduces a new server property {config:option}`storage-zfs-volume-conf:zfs.use_refquota` which instructs LXD
 to set the `refquota` property instead of `quota` when setting a size limit
 on a container. LXD will also then use `usedbydataset` in place of `used`
 when being queried about disk utilization.
@@ -199,22 +206,22 @@ This shows up as a `fs_progress` attribute in the operation metadata.
 
 ## `id_map`
 
-Enables setting the `security.idmap.isolated` and `security.idmap.isolated`,
-`security.idmap.size`, and `raw.id_map` fields.
+Enables setting the {config:option}`instance-security:security.idmap.isolated`,
+{config:option}`instance-security:security.idmap.size`, and {config:option}`instance-raw:raw.idmap` fields.
 
 ## `network_firewall_filtering`
 
-Add two new keys, `ipv4.firewall` and `ipv6.firewall` which if set to
+Add two new keys, {config:option}`network-bridge-network-conf:ipv4.firewall` and {config:option}`network-bridge-network-conf:ipv6.firewall` which if set to
 `false` will turn off the generation of `iptables` FORWARDING rules. NAT
-rules will still be added so long as the matching `ipv4.nat` or
-`ipv6.nat` key is set to `true`.
+rules will still be added so long as the matching {config:option}`network-bridge-network-conf:ipv4.nat` or
+{config:option}`network-bridge-network-conf:ipv6.nat` key is set to `true`.
 
 Rules necessary for `dnsmasq` to work (DHCP/DNS) will always be applied if
 `dnsmasq` is enabled on the bridge.
 
 ## `network_routes`
 
-Introduces `ipv4.routes` and `ipv6.routes` which allow routing additional subnets to a LXD bridge.
+Introduces {config:option}`network-bridge-network-conf:ipv4.routes` and {config:option}`network-bridge-network-conf:ipv6.routes` which allow routing additional subnets to a LXD bridge.
 
 ## `storage`
 
@@ -254,19 +261,19 @@ Implements the `X-LXD-write` header which can be one of `overwrite` or `append`.
 
 ## `network_dhcp_expiry`
 
-Introduces `ipv4.dhcp.expiry` and `ipv6.dhcp.expiry` allowing to set the DHCP lease expiry time.
+Introduces {config:option}`network-bridge-network-conf:ipv4.dhcp.expiry` and {config:option}`network-bridge-network-conf:ipv6.dhcp.expiry` allowing to set the DHCP lease expiry time.
 
 ## `storage_lvm_vg_rename`
 
-Introduces the ability to rename a volume group by setting `storage.lvm.vg_name`.
+Introduces the ability to rename a volume group by setting {config:option}`storage-lvm-pool-conf:lvm.vg_name`.
 
 ## `storage_lvm_thinpool_rename`
 
-Introduces the ability to rename a thin pool name by setting `storage.thinpool_name`.
+Introduces the ability to rename a thin pool name by setting {config:option}`storage-lvm-pool-conf:lvm.thinpool_name`.
 
 ## `network_vlan`
 
-This adds a new `vlan` property to `macvlan` network devices.
+This adds a new {config:option}`device-nic-macvlan-device-conf:vlan` property to `macvlan` network devices.
 
 When set, this will instruct LXD to attach to the specified VLAN. LXD
 will look for an existing interface for that VLAN on the host. If one
@@ -290,7 +297,7 @@ container will be copied or moved.
 
 ## `storage_zfs_clone_copy`
 
-Introduces a new Boolean `storage_zfs_clone_copy` property for ZFS storage
+Introduces a new Boolean {config:option}`storage-zfs-pool-conf:zfs.clone_copy` property for ZFS storage
 pools. When set to `false` copying a container will be done through `zfs send` and
 receive. This will make the target container independent of its source
 container thus avoiding the need to keep dependent snapshots in the ZFS pool
@@ -315,13 +322,13 @@ places an upper limit on the amount of socket I/O allowed.
 
 ## `network_vxlan_interface`
 
-This introduces a new `tunnel.NAME.interface` option for networks.
+This introduces a new {config:option}`network-bridge-network-conf:tunnel.NAME.interface` option for networks.
 
 This key control what host network interface is used for a VXLAN tunnel.
 
 ## `storage_btrfs_mount_options`
 
-This introduces the `btrfs.mount_options` property for Btrfs storage pools.
+This introduces the {config:option}`storage-btrfs-pool-conf:btrfs.mount_options` property for Btrfs storage pools.
 
 This key controls what mount options will be used for the Btrfs storage pool.
 
@@ -340,7 +347,7 @@ property in the containers root disk device.
 
 ## `id_map_base`
 
-This introduces a new `security.idmap.base` allowing the user to skip the
+This introduces a new {config:option}`instance-security:security.idmap.base` allowing the user to skip the
 map auto-selection process for isolated containers and specify what host
 UID/GID to use as the base.
 
@@ -356,7 +363,7 @@ used to have the source LXD host connect to the target during migration.
 
 ## `network_vlan_physical`
 
-Allows use of `vlan` property with `physical` network devices.
+Allows use of {config:option}`network-physical-network-conf:vlan` property with `physical` network devices.
 
 When set, this will instruct LXD to attach to the specified VLAN on the `parent` interface.
 LXD will look for an existing interface for that `parent` and VLAN on the host.
@@ -420,10 +427,6 @@ files for the container via `nofile`. The format is `limits.kernel.[limit name]`
 
 This adds support for renaming custom storage volumes.
 
-## `macaroon_authentication`
-
-This adds support for external authentication via Macaroons.
-
 ## `network_sriov`
 
 This adds support for SR-IOV enabled network devices.
@@ -434,8 +437,8 @@ This adds support to interact with the container console device and console log.
 
 ## `restrict_devlxd`
 
-A new `security.devlxd` container configuration key was introduced.
-The key controls whether the `/dev/lxd` interface is made available to the container.
+A new {config:option}`instance-security:security.devlxd` container configuration key was introduced.
+The key controls whether the `/dev/lxd` interface is made available to the instance.
 If set to `false`, this effectively prevents the container from interacting with the LXD daemon.
 
 ## `migration_pre_copy`
@@ -467,7 +470,7 @@ of connections between the host and container.
 
 ## `network_dhcp_gateway`
 
-Introduces a new `ipv4.dhcp.gateway` network configuration key to set an alternate gateway.
+Introduces a new {config:option}`network-bridge-network-conf:ipv4.dhcp.gateway` network configuration key to set an alternate gateway.
 
 ## `file_get_symlink`
 
@@ -480,7 +483,7 @@ bridges which run a LXD-managed DHCP server.
 
 ## `unix_device_hotplug`
 
-This adds support for the `required` property for Unix devices.
+This adds support for the {config:option}`device-unix-hotplug-device-conf:required` property for Unix devices.
 
 ## `storage_api_local_volume_handling`
 
@@ -530,13 +533,13 @@ This adds the ability to copy and move custom storage volumes between remote.
 
 ## `nvidia_runtime`
 
-Adds a `nvidia_runtime` configuration option for containers, setting this to
+Adds a {config:option}`instance-nvidia:nvidia.runtime` configuration option for containers, setting this to
 `true` will have the NVIDIA runtime and CUDA libraries passed to the
 container.
 
 ## `container_mount_propagation`
 
-This adds a new `propagation` option to the disk device type, allowing
+This adds a new {config:option}`device-disk-device-conf:propagation` option to the disk device type, allowing
 the configuration of kernel mount propagation.
 
 ## `container_backup`
@@ -560,7 +563,7 @@ The following existing endpoint has been modified:
 
 ## `devlxd_images`
 
-Adds a `security.devlxd.images` configuration option for containers which
+Adds a {config:option}`instance-security:security.devlxd.images` configuration option for containers which
 controls the availability of a `/1.0/images/FINGERPRINT/export` API over
 `devlxd`. This can be used by a container running nested LXD to access raw
 images from the host.
@@ -628,29 +631,29 @@ sockets.
 
 ## `container_protection_delete`
 
-Enables setting the `security.protection.delete` field which prevents containers
+Enables setting the {config:option}`instance-security:security.protection.delete` field which prevents containers
 from being deleted if set to `true`. Snapshots are not affected by this setting.
 
 ## `proxy_priv_drop`
 
-Adds `security.uid` and `security.gid` for the proxy devices, allowing
+Adds {config:option}`device-proxy-device-conf:security.uid` and {config:option}`device-proxy-device-conf:security.gid` for the proxy devices, allowing
 privilege dropping and effectively changing the UID/GID used for
 connections to Unix sockets too.
 
 ## `pprof_http`
 
-This adds a new `core.debug_address` configuration option to start a debugging HTTP server.
+This adds a new {config:option}`server-core:core.debug_address` configuration option to start a debugging HTTP server.
 
 That server currently includes a `pprof` API and replaces the old
 `cpu-profile`, `memory-profile` and `print-goroutines` debug options.
 
 ## `proxy_haproxy_protocol`
 
-Adds a `proxy_protocol` key to the proxy device which controls the use of the HAProxy PROXY protocol header.
+Adds a {config:option}`device-proxy-device-conf:proxy_protocol` key to the proxy device which controls the use of the HAProxy PROXY protocol header.
 
 ## `network_hwaddr`
 
-Adds a `bridge.hwaddr` key to control the MAC address of the bridge.
+Adds a {config:option}`network-bridge-network-conf:bridge.hwaddr` key to control the MAC address of the bridge.
 
 ## `proxy_nat`
 
@@ -659,7 +662,7 @@ will be done via `iptables` instead of proxy devices.
 
 ## `network_nat_order`
 
-This introduces the `ipv4.nat.order` and `ipv6.nat.order` configuration keys for LXD bridges.
+This introduces the {config:option}`network-bridge-network-conf:ipv4.nat.order` and {config:option}`network-bridge-network-conf:ipv6.nat.order` configuration keys for LXD bridges.
 Those keys control whether to put the LXD rules before or after any pre-existing rules in the chain.
 
 ## `container_full`
@@ -669,26 +672,14 @@ all container structs, including the state, snapshots and backup structs.
 
 This effectively allows for [`lxc list`](lxc_list.md) to get all it needs in one query.
 
-## `candid_authentication`
-
-This introduces the new `candid.api.url` configuration option and removes
-`core.macaroon.endpoint`.
-
 ## `backup_compression`
 
-This introduces a new `backups.compression_algorithm` configuration key which
+This introduces a new {config:option}`server-miscellaneous:backups.compression_algorithm` configuration key which
 allows configuration of backup compression.
-
-## `candid_config`
-
-This introduces the configuration keys `candid.domains` and `candid.expiry`. The
-former allows specifying allowed/valid Candid domains, the latter makes the
-macaroon's expiry configurable. The [`lxc remote add`](lxc_remote_add.md) command now has a
-`--domain` flag which allows specifying a Candid domain.
 
 ## `nvidia_runtime_config`
 
-This introduces a few extra configuration keys when using `nvidia.runtime` and the `libnvidia-container` library.
+This introduces a few extra configuration keys when using {config:option}`instance-nvidia:nvidia.runtime` and the `libnvidia-container` library.
 Those keys translate pretty much directly to the matching NVIDIA container environment variables:
 
 * `nvidia.driver.capabilities` => `NVIDIA_DRIVER_CAPABILITIES`
@@ -727,15 +718,9 @@ Add a new project API, supporting creation, update and deletion of projects.
 Projects can hold containers, profiles or images at this point and let
 you get a separate view of your LXD resources by switching to it.
 
-## `candid_config_key`
-
-This introduces a new `candid.api.key` option which allows for setting
-the expected public key for the endpoint, allowing for safe use of a
-HTTP-only Candid server.
-
 ## `network_vxlan_ttl`
 
-This adds a new `tunnel.NAME.ttl` network configuration option which
+This adds a new {config:option}`network-bridge-network-conf:tunnel.NAME.ttl` network configuration option which
 makes it possible to raise the TTL on VXLAN tunnels.
 
 ## `container_incremental_copy`
@@ -747,7 +732,7 @@ is performed.
 
 ## `usb_optional_vendorid`
 
-As the name implies, the `vendorid` field on USB devices attached to
+As the name implies, the {config:option}`device-unix-usb-device-conf:vendorid` field on USB devices attached to
 containers has now been made optional, allowing for all USB devices to
 be passed to a container (similar to what's done for GPUs).
 
@@ -774,7 +759,7 @@ This adds support for configuring a server network address which differs from
 the REST API client network address. When bootstrapping a new cluster, clients
 can set the new `cluster.https_address` configuration key to specify the address of
 the initial server. When joining a new server, clients can set the
-`core.https_address` configuration key of the joining server to the REST API
+{config:option}`server-core:core.https_address` configuration key of the joining server to the REST API
 address the joining server should listen at, and set the `server_address`
 key in the `PUT /1.0/cluster` API to the address the joining server should
 use for clustering traffic (the value of `server_address` will be
@@ -789,7 +774,7 @@ to specify to the minimal numbers of nodes for image replication.
 
 ## `container_protection_shift`
 
-Enables setting the `security.protection.shift` option which prevents containers
+Enables setting the {config:option}`instance-security:security.protection.shift` option which prevents containers
 from having their file system shifted.
 
 ## `snapshot_expiry`
@@ -849,7 +834,7 @@ This effectively gives us:
 * `volatile.idmap.next` => Next on-disk idmap
 
 This is required to implement environments where the on-disk map isn't
-changed but the kernel map is (e.g. `shiftfs`).
+changed but the kernel map is (e.g. `idmapped mounts`).
 
 ## `event_location`
 
@@ -861,25 +846,13 @@ This allows migrating storage volumes including their snapshots.
 
 ## `network_nat_address`
 
-This introduces the `ipv4.nat.address` and `ipv6.nat.address` configuration keys for LXD bridges.
+This introduces the {config:option}`network-bridge-network-conf:ipv4.nat.address` and {config:option}`network-bridge-network-conf:ipv6.nat.address` configuration keys for LXD bridges.
 Those keys control the source address used for outbound traffic from the bridge.
 
 ## `container_nic_routes`
 
 This introduces the `ipv4.routes` and `ipv6.routes` properties on `nic` type devices.
 This allows adding static routes on host to container's NIC.
-
-## `rbac`
-
-Adds support for RBAC (role based access control). This introduces new configuration keys:
-
-* `rbac.api.url`
-* `rbac.api.key`
-* `rbac.api.expiry`
-* `rbac.agent.url`
-* `rbac.agent.username`
-* `rbac.agent.private_key`
-* `rbac.agent.public_key`
 
 ## `cluster_internal_copy`
 
@@ -950,7 +923,7 @@ elevated permissions.
 
 ## `container_disk_shift`
 
-Adds the `shift` property on `disk` devices which controls the use of the `shiftfs` overlay.
+Adds the `shift` property on `disk` devices which controls the use of the `idmapped mounts` overlay.
 
 ## `storage_shifted`
 
@@ -960,7 +933,7 @@ Setting it to `true` will allow multiple isolated containers to attach the
 same storage volume while keeping the file system writable from all of
 them.
 
-This makes use of `shiftfs` as an overlay file system.
+This makes use of `idmapped mounts` as an overlay file system.
 
 ## `resources_infiniband`
 
@@ -1144,7 +1117,7 @@ configuration keys: `snapshots.schedule` and
 ## `trust_ca_certificates`
 
 This allows for checking client certificates trusted by the provided CA (`server.ca`).
-It can be enabled by setting `core.trust_ca_certificates` to `true`.
+It can be enabled by setting {config:option}`server-core:core.trust_ca_certificates` to `true`.
 If enabled, it will perform the check, and bypass the trusted password if `true`.
 An exception will be made if the connecting client certificate is in the provided CRL (`ca.crl`).
 In this case, it will ask for the password.
@@ -1303,10 +1276,12 @@ which can be used to set the failure domain of a node.
 
 A number of new syscalls related container configuration keys were updated.
 
-* `security.syscalls.deny_default`
-* `security.syscalls.deny_compat`
-* `security.syscalls.deny`
-* `security.syscalls.allow`
+* {config:option}`instance-security:security.syscalls.deny_default`
+* {config:option}`instance-security:security.syscalls.deny_compat`
+* {config:option}`instance-security:security.syscalls.deny`
+* {config:option}`instance-security:security.syscalls.allow`
+
+Support for the offensively named variants was removed.
 
 ## `resources_gpu_mdev`
 
@@ -1629,7 +1604,7 @@ Adds an editable description to the cluster members.
 
 ## `server_trusted_proxy`
 
-This introduces support for `core.https_trusted_proxy` which has LXD
+This introduces support for {config:option}`server-core:core.https_trusted_proxy` which has LXD
 parse a HAProxy style connection header on such connections and if
 present, will rewrite the request's source address to that provided by
 the proxy server.
@@ -1678,9 +1653,9 @@ routes to `bridge` and `ovn` networks.
 
 This comes with the addition to global configuration of:
 
-* `core.bgp_address`
-* `core.bgp_asn`
-* `core.bgp_routerid`
+* {config:option}`server-core:core.bgp_address`
+* {config:option}`server-core:core.bgp_asn`
+* {config:option}`server-core:core.bgp_routerid`
 
 The following network configurations keys (`bridge` and `physical`):
 
@@ -1743,7 +1718,7 @@ Introduces a built-in DNS server and zones API to provide DNS records for LXD in
 
 This introduces the following server configuration key:
 
-* `core.dns_address`
+* {config:option}`server-core:core.dns_address`
 
 The following network configuration key:
 
@@ -1934,7 +1909,7 @@ Adds new `restricted.container.intercept` configuration key to allow usually saf
 
 ## `metrics_authentication`
 
-Introduces a new `core.metrics_authentication` server configuration option to
+Introduces a new {config:option}`server-core:core.metrics_authentication` server configuration option to
 allow for the `/1.0/metrics` endpoint to be generally available without
 client authentication.
 
@@ -1953,7 +1928,7 @@ Introduces a new `ovn-chassis` cluster role which allows for specifying what clu
 
 ## `container_syscall_intercept_sched_setscheduler`
 
-Adds the `security.syscalls.intercept.sched_setscheduler` to allow advanced process priority management in containers.
+Adds the {config:option}`instance-security:security.syscalls.intercept.sched_setscheduler` to allow advanced process priority management in containers.
 
 ## `storage_lvm_thinpool_metadata_size`
 
@@ -1981,7 +1956,7 @@ Adds ability to modify the set of profiles when image is copied.
 
 ## `container_syscall_intercept_sysinfo`
 
-Adds the `security.syscalls.intercept.sysinfo` to allow the `sysinfo` syscall to be populated with cgroup-based resource usage information.
+Adds the {config:option}`instance-security:security.syscalls.intercept.sysinfo` to allow the `sysinfo` syscall to be populated with cgroup-based resource usage information.
 
 ## `clustering_evacuation_mode`
 
@@ -2053,7 +2028,7 @@ This also introduces a change whereby network access is controlled by the projec
 
 ## `storage_buckets_local`
 
-This introduces the ability to use storage buckets on local storage pools by setting the new `core.storage_buckets_address` global configuration setting.
+This introduces the ability to use storage buckets on local storage pools by setting the new {config:option}`server-core:core.storage_buckets_address` global configuration setting.
 
 ## `loki`
 
@@ -2061,12 +2036,12 @@ This adds support for sending life cycle and logging events to a Loki server.
 
 It adds the following global configuration keys:
 
-* `loki.api.ca_cert`: CA certificate which can be used when sending events to the Loki server
-* `loki.api.url`: URL to the Loki server (protocol, name or IP and port)
-* `loki.auth.username` and `loki.auth.password`: Used if Loki is behind a reverse proxy with basic authentication enabled
-* `loki.labels`: Comma-separated list of values which are to be used as labels for Loki events.
-* `loki.loglevel`: Minimum log level for events sent to the Loki server.
-* `loki.types`: Types of events which are to be sent to the Loki server (`lifecycle` and/or `logging`).
+* {config:option}`server-loki:loki.api.ca_cert`: CA certificate which can be used when sending events to the Loki server
+* {config:option}`server-loki:loki.api.url`: URL to the Loki server (protocol, name or IP and port)
+* {config:option}`server-loki:loki.auth.username` and {config:option}`server-loki:loki.auth.password`: Used if Loki is behind a reverse proxy with basic authentication enabled
+* {config:option}`server-loki:loki.labels`: Comma-separated list of values which are to be used as labels for Loki events.
+* {config:option}`server-loki:loki.loglevel`: Minimum log level for events sent to the Loki server.
+* {config:option}`server-loki:loki.types`: Types of events which are to be sent to the Loki server (`lifecycle` and/or `logging`).
 
 ## `acme`
 
@@ -2074,9 +2049,9 @@ This adds ACME support, which allows [Let's Encrypt](https://letsencrypt.org/) o
 
 It adds the following global configuration keys:
 
-* `acme.domain`: The domain for which the certificate should be issued.
-* `acme.email`: The email address used for the account of the ACME service.
-* `acme.ca_url`: The directory URL of the ACME service, defaults to `https://acme-v02.api.letsencrypt.org/directory`.
+* {config:option}`server-acme:acme.domain`: The domain for which the certificate should be issued.
+* {config:option}`server-acme:acme.email`: The email address used for the account of the ACME service.
+* {config:option}`server-acme:acme.ca_url`: The directory URL of the ACME service, defaults to `https://acme-v02.api.letsencrypt.org/directory`.
 
 It also adds the following endpoint, which is required for the HTTP-01 challenge:
 
@@ -2100,7 +2075,7 @@ This adds an expiry to cluster join tokens which defaults to 3 hours, but can be
 ## `remote_token_expiry`
 
 This adds an expiry to remote add join tokens.
-It can be set in the `core.remote_token_expiry` configuration key, and default to no expiry.
+It can be set in the {config:option}`server-core:core.remote_token_expiry` configuration key, and default to no expiry.
 
 ## `storage_volumes_created_at`
 
@@ -2175,10 +2150,10 @@ Adds support for AMD SEV (Secure Encrypted Virtualization) that can be used to e
 
 This adds the following new configuration options for SEV encryption:
 
-* `security.sev` : (bool) is SEV enabled for this VM
-* `security.sev.policy.es` : (bool) is SEV-ES enabled for this VM
-* `security.sev.session.dh` : (string) guest owner's `base64`-encoded Diffie-Hellman key
-* `security.sev.session.data` : (string) guest owner's `base64`-encoded session blob
+* {config:option}`instance-security:security.sev` : (bool) is SEV enabled for this VM
+* {config:option}`instance-security:security.sev.policy.es` : (bool) is SEV-ES enabled for this VM
+* {config:option}`instance-security:security.sev.session.dh` : (string) guest owner's `base64`-encoded Diffie-Hellman key
+* {config:option}`instance-security:security.sev.session.data` : (string) guest owner's `base64`-encoded session blob
 
 ## `storage_pool_loop_resize`
 This allows growing loop file backed storage pools by changing the `size` setting of the pool.
@@ -2201,9 +2176,9 @@ This adds support for OpenID Connect (OIDC) authentication.
 
 This adds the following new configuration keys:
 
-* `oidc.issuer`
-* `oidc.client.id`
-* `oidc.audience`
+* {config:option}`server-oidc:oidc.issuer`
+* {config:option}`server-oidc:oidc.client.id`
+* {config:option}`server-oidc:oidc.audience`
 
 ## `network_ovn_l3only`
 This adds the ability to set an `ovn` network into "layer 3 only" mode.
@@ -2243,7 +2218,7 @@ This introduces:
 * `auth_user_method`
 
 ## `security_csm`
-Introduce a new `security.csm` configuration key to control the use of
+Introduce a new {config:option}`instance-security:security.csm` configuration key to control the use of
 `CSM` (Compatibility Support Module) to allow legacy operating systems to
 be run in LXD VMs.
 
@@ -2288,7 +2263,7 @@ Check the list of {doc}`configuration options </config-options>` to see which co
 
 ## `syslog_socket`
 
-This introduces a syslog socket that can receive syslog formatted log messages. These can be viewed in the events API and `lxc monitor`, and can be forwarded to Loki. To enable this feature, set `core.syslog_socket` to `true`.
+This introduces a syslog socket that can receive syslog formatted log messages. These can be viewed in the events API and `lxc monitor`, and can be forwarded to Loki. To enable this feature, set {config:option}`server-core:core.syslog_socket` to `true`.
 
 ## `event_lifecycle_name_and_project`
 
@@ -2306,3 +2281,128 @@ during instance initialization using the `--device` flag.
 
 Note that these configuration are applied only at the time of instance creation and subsequent modifications have
 no effect on existing devices.
+
+## `operation_wait`
+
+This API extension indicates that the `/1.0/operations/{id}/wait` endpoint exists on the server. This indicates to the client
+that the endpoint can be used to wait for an operation to complete rather than waiting for an operation event via the
+`/1.0/events` endpoint.
+
+## `cluster_internal_custom_volume_copy`
+
+This extension adds support for copying and moving custom storage volumes within a cluster with a single API call.
+Calling `POST /1.0/storage-pools/<pool>/custom?target=<target>` will copy the custom volume specified in the `source` part of the request.
+Calling `POST /1.0/storage-pools/<pool>/custom/<volume>?target=<target>` will move the custom volume from the source, specified in the `source` part of the request, to the target.
+
+## `disk_io_bus`
+This introduces a new {config:option}`device-disk-device-conf:io.bus` property to disk devices which can be used to override the bus the disk is attached to.
+
+## `storage_cephfs_create_missing`
+This introduces the configuration keys {config:option}`storage-cephfs-pool-conf:cephfs.create_missing`, {config:option}`storage-cephfs-pool-conf:cephfs.osd_pg_num`, {config:option}`storage-cephfs-pool-conf:cephfs.meta_pool` and {config:option}`storage-cephfs-pool-conf:cephfs.data_pool` to be used when adding a `cephfs` storage pool to instruct LXD to create the necessary entities for the storage pool, if they do not exist.
+
+## `instance_move_config`
+
+This API extension provides the ability to use flags `--profile`, `--no-profile`, `--device`, and `--config`
+when moving an instance between projects and/or storage pools.
+
+## `ovn_ssl_config`
+This introduces new server configuration keys to provide the SSL CA and client key pair to access the OVN databases.
+The new configuration keys are {config:option}`server-miscellaneous:network.ovn.ca_cert`, {config:option}`server-miscellaneous:network.ovn.client_cert` and {config:option}`server-miscellaneous:network.ovn.client_key`.
+
+## `init_preseed_storage_volumes`
+This API extension provides the ability to configure storage volumes in preseed init.
+
+## `metrics_instances_count`
+
+This extends the metrics to include the containers and virtual machines counts. Instances are counted irrespective of their state.
+
+## `server_instance_type_info`
+
+This API extension enables querying a server's supported instance types.
+When querying the `/1.0` endpoint, a new field named `instance_types` is added to the retrieved data.
+This field indicates which instance types are supported by the server.
+
+## `resources_disk_mounted`
+
+Adds a `mounted` field to disk resources that LXD discovers on the system, reporting whether that disk or partition is
+mounted.
+
+## `server_version_lts`
+
+The API extension adds indication whether the LXD version is an LTS release.
+This is indicated when command `lxc version` is executed or when `/1.0` endpoint is queried.
+
+## `oidc_groups_claim`
+
+This API extension enables setting an {config:option}`server-oidc:oidc.groups.claim` configuration key.
+If OIDC authentication is configured and this claim is set, LXD will request this claim in the scope of OIDC flow.
+The value of the claim will be extracted and might be used to make authorization decisions.
+
+## `loki_config_instance`
+
+Adds a new {config:option}`server-loki:loki.instance` server configuration key to customize the `instance` field in Loki events.
+This can be used to expose the name of the cluster rather than the individual system name sending
+the event as that's usually already covered by the `location` field.
+
+## `storage_volatile_uuid`
+
+Adds a new `volatile.uuid` configuration key to all storage volumes, snapshots and buckets.
+This information can be used by storage drivers as a separate identifier besides the name
+when working with volumes.
+
+## `import_instance_devices`
+
+This API extension provides the ability to use flags `--device` when importing an instance to override instance's devices.
+
+## `instances_uefi_vars`
+
+This API extension indicates that the `/1.0/instances/{name}/uefi-vars` endpoint is supported on the server. This endpoint allows to get the full list of UEFI variables (HTTP method GET) or replace the entire set of UEFI variables (HTTP method PUT).
+
+## `instances_migration_stateful`
+
+This API extension allows newly created VMs to have their {config:option}`instance-migration:migration.stateful` configuration key automatically set
+through the new server-level configuration key {config:option}`server-miscellaneous:instances.migration.stateful`. If `migration.stateful` is already set at the profile or instance level then `instances.migration.stateful` is not applied.
+
+## `access_management`
+
+Adds new APIs under `/1.0/auth` for viewing and managing identities, groups, and permissions.
+Adds an embedded OpenFGA authorization driver for enforcing fine-grained permissions.
+
+```{important}
+Prior to the addition of this extension, all OIDC clients were given full access to LXD (equivalent to Unix socket access).
+This extension revokes access to all OIDC clients.
+To regain access, a user must:
+1. Make a call to the OIDC enabled LXD remote (e.g. `lxc info`) to ensure that their OIDC identity is added to the LXD database.
+2. Create a group: `lxc auth group create <group_name>`
+3. Grant the group a suitable permission.
+   As all OIDC clients prior to this extension have had full access to LXD, the corresponding permission is `admin` on `server`.
+   To grant this permission to your group, run: `lxc auth group permission add <group_name> server admin`
+4. Add themselves to the group. To do this, run: `lxc auth identity group add oidc/<email_address> <group_name>`
+
+Steps 2 to 4 above cannot be performed via OIDC authentication (access has been revoked).
+They must be performed by a sufficiently privileged user, either via Unix socket or unrestricted TLS client certificate.
+
+For more information on access control for OIDC clients, see {ref}`fine-grained-authorization`.
+```
+
+## `vm_disk_io_limits`
+
+Adds the ability to limit disk I/O for virtual machines.
+
+## `storage_volumes_all`
+
+This API extension adds support for listing storage volumes from all storage pools via `/1.0/storage-volumes` or `/1.0/storage-volumes/{type}` to filter by volume type. Also adds a `pool` field to storage volumes.
+
+## `instances_files_modify_permissions`
+
+Adds the ability for `POST /1.0/instances/{name}/files` to modify the permissions of files that already exist via the `X-LXD-modify-perm` header.
+
+`X-LXD-modify-perm` should be a comma-separated list of 0 or more of `mode`, `uid`, and `gid`.
+
+## `image_restriction_nesting`
+
+This extension adds a new image restriction, `requirements.nesting` which when `true` indicates that an image cannot be run without nesting.
+## `container_syscall_intercept_finit_module`
+
+Adds the `linux.kernel_modules.load` container configuration option. If the option is set to `ondemand`, the `finit_modules()` syscall is intercepted and a privileged user in the container's user namespace can load the Linux kernel modules specified in the
+allow list `linux.kernel_modules`.

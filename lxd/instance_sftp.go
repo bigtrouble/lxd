@@ -13,6 +13,7 @@ import (
 
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/instance"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
@@ -44,7 +45,7 @@ import (
 func instanceSFTPHandler(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	instName, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -71,7 +72,7 @@ func instanceSFTPHandler(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Forward the request if the instance is remote.
-	client, err := cluster.ConnectIfInstanceIsRemote(s.DB.Cluster, projectName, instName, s.Endpoints.NetworkCert(), s.ServerCert(), r, instanceType)
+	client, err := cluster.ConnectIfInstanceIsRemote(s, projectName, instName, r, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -89,7 +90,7 @@ func instanceSFTPHandler(d *Daemon, r *http.Request) response.Response {
 
 		resp.instConn, err = inst.FileSFTPConn()
 		if err != nil {
-			return response.SmartError(api.StatusErrorf(http.StatusInternalServerError, "Failed getting instance SFTP connection: %v", err))
+			return response.SmartError(api.StatusErrorf(http.StatusInternalServerError, "Failed getting instance SFTP connection: %w", err))
 		}
 	}
 
@@ -107,6 +108,7 @@ func (r *sftpServeResponse) String() string {
 	return "sftp handler"
 }
 
+// Render renders the server response.
 func (r *sftpServeResponse) Render(w http.ResponseWriter) error {
 	defer func() { _ = r.instConn.Close() }()
 
@@ -117,7 +119,7 @@ func (r *sftpServeResponse) Render(w http.ResponseWriter) error {
 
 	remoteConn, _, err := hijacker.Hijack()
 	if err != nil {
-		return api.StatusErrorf(http.StatusInternalServerError, "Failed to hijack connection: %v", err)
+		return api.StatusErrorf(http.StatusInternalServerError, "Failed to hijack connection: %w", err)
 	}
 
 	defer func() { _ = remoteConn.Close() }()
@@ -127,7 +129,7 @@ func (r *sftpServeResponse) Render(w http.ResponseWriter) error {
 		// Apply TCP timeouts if remote connection is TCP (rather than Unix).
 		err = tcp.SetTimeouts(remoteTCP, 0)
 		if err != nil {
-			return api.StatusErrorf(http.StatusInternalServerError, "Failed setting TCP timeouts on remote connection: %v", err)
+			return api.StatusErrorf(http.StatusInternalServerError, "Failed setting TCP timeouts on remote connection: %w", err)
 		}
 	}
 

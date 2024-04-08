@@ -73,14 +73,14 @@ func ConfigDiff(oldConfig map[string]string, newConfig map[string]string) ([]str
 // VolumeTypeNameToDBType converts a volume type string to internal volume type DB code.
 func VolumeTypeNameToDBType(volumeTypeName string) (int, error) {
 	switch volumeTypeName {
-	case db.StoragePoolVolumeTypeNameContainer:
-		return db.StoragePoolVolumeTypeContainer, nil
-	case db.StoragePoolVolumeTypeNameVM:
-		return db.StoragePoolVolumeTypeVM, nil
-	case db.StoragePoolVolumeTypeNameImage:
-		return db.StoragePoolVolumeTypeImage, nil
-	case db.StoragePoolVolumeTypeNameCustom:
-		return db.StoragePoolVolumeTypeCustom, nil
+	case cluster.StoragePoolVolumeTypeNameContainer:
+		return cluster.StoragePoolVolumeTypeContainer, nil
+	case cluster.StoragePoolVolumeTypeNameVM:
+		return cluster.StoragePoolVolumeTypeVM, nil
+	case cluster.StoragePoolVolumeTypeNameImage:
+		return cluster.StoragePoolVolumeTypeImage, nil
+	case cluster.StoragePoolVolumeTypeNameCustom:
+		return cluster.StoragePoolVolumeTypeCustom, nil
 	}
 
 	return -1, fmt.Errorf("Invalid storage volume type name")
@@ -90,13 +90,13 @@ func VolumeTypeNameToDBType(volumeTypeName string) (int, error) {
 func VolumeTypeToDBType(volType drivers.VolumeType) (int, error) {
 	switch volType {
 	case drivers.VolumeTypeContainer:
-		return db.StoragePoolVolumeTypeContainer, nil
+		return cluster.StoragePoolVolumeTypeContainer, nil
 	case drivers.VolumeTypeVM:
-		return db.StoragePoolVolumeTypeVM, nil
+		return cluster.StoragePoolVolumeTypeVM, nil
 	case drivers.VolumeTypeImage:
-		return db.StoragePoolVolumeTypeImage, nil
+		return cluster.StoragePoolVolumeTypeImage, nil
 	case drivers.VolumeTypeCustom:
-		return db.StoragePoolVolumeTypeCustom, nil
+		return cluster.StoragePoolVolumeTypeCustom, nil
 	}
 
 	return -1, fmt.Errorf("Invalid storage volume type: %q", volType)
@@ -105,13 +105,13 @@ func VolumeTypeToDBType(volType drivers.VolumeType) (int, error) {
 // VolumeDBTypeToType converts internal volume type DB code to storage driver volume type.
 func VolumeDBTypeToType(volDBType int) (drivers.VolumeType, error) {
 	switch volDBType {
-	case db.StoragePoolVolumeTypeContainer:
+	case cluster.StoragePoolVolumeTypeContainer:
 		return drivers.VolumeTypeContainer, nil
-	case db.StoragePoolVolumeTypeVM:
+	case cluster.StoragePoolVolumeTypeVM:
 		return drivers.VolumeTypeVM, nil
-	case db.StoragePoolVolumeTypeImage:
+	case cluster.StoragePoolVolumeTypeImage:
 		return drivers.VolumeTypeImage, nil
-	case db.StoragePoolVolumeTypeCustom:
+	case cluster.StoragePoolVolumeTypeCustom:
 		return drivers.VolumeTypeCustom, nil
 	}
 
@@ -146,11 +146,11 @@ func VolumeTypeToAPIInstanceType(volType drivers.VolumeType) (api.InstanceType, 
 func VolumeContentTypeToDBContentType(contentType drivers.ContentType) (int, error) {
 	switch contentType {
 	case drivers.ContentTypeBlock:
-		return db.StoragePoolVolumeContentTypeBlock, nil
+		return cluster.StoragePoolVolumeContentTypeBlock, nil
 	case drivers.ContentTypeFS:
-		return db.StoragePoolVolumeContentTypeFS, nil
+		return cluster.StoragePoolVolumeContentTypeFS, nil
 	case drivers.ContentTypeISO:
-		return db.StoragePoolVolumeContentTypeISO, nil
+		return cluster.StoragePoolVolumeContentTypeISO, nil
 	}
 
 	return -1, fmt.Errorf("Invalid volume content type")
@@ -159,11 +159,11 @@ func VolumeContentTypeToDBContentType(contentType drivers.ContentType) (int, err
 // VolumeDBContentTypeToContentType converts internal content type DB code to driver representation.
 func VolumeDBContentTypeToContentType(volDBType int) (drivers.ContentType, error) {
 	switch volDBType {
-	case db.StoragePoolVolumeContentTypeBlock:
+	case cluster.StoragePoolVolumeContentTypeBlock:
 		return drivers.ContentTypeBlock, nil
-	case db.StoragePoolVolumeContentTypeFS:
+	case cluster.StoragePoolVolumeContentTypeFS:
 		return drivers.ContentTypeFS, nil
-	case db.StoragePoolVolumeContentTypeISO:
+	case cluster.StoragePoolVolumeContentTypeISO:
 		return drivers.ContentTypeISO, nil
 	}
 
@@ -173,12 +173,12 @@ func VolumeDBContentTypeToContentType(volDBType int) (drivers.ContentType, error
 // VolumeContentTypeNameToContentType converts volume content type string internal code.
 func VolumeContentTypeNameToContentType(contentTypeName string) (int, error) {
 	switch contentTypeName {
-	case db.StoragePoolVolumeContentTypeNameFS:
-		return db.StoragePoolVolumeContentTypeFS, nil
-	case db.StoragePoolVolumeContentTypeNameBlock:
-		return db.StoragePoolVolumeContentTypeBlock, nil
-	case db.StoragePoolVolumeContentTypeNameISO:
-		return db.StoragePoolVolumeContentTypeISO, nil
+	case cluster.StoragePoolVolumeContentTypeNameFS:
+		return cluster.StoragePoolVolumeContentTypeFS, nil
+	case cluster.StoragePoolVolumeContentTypeNameBlock:
+		return cluster.StoragePoolVolumeContentTypeBlock, nil
+	case cluster.StoragePoolVolumeContentTypeNameISO:
+		return cluster.StoragePoolVolumeContentTypeISO, nil
 	}
 
 	return -1, fmt.Errorf("Invalid volume content type name")
@@ -280,13 +280,16 @@ func VolumeDBCreate(pool Pool, projectName string, volumeName string, volumeDesc
 		return err
 	}
 
-	// Create the database entry for the storage volume.
-	if snapshot {
-		_, err = p.state.DB.Cluster.CreateStorageVolumeSnapshot(projectName, volumeName, volumeDescription, volDBType, pool.ID(), vol.Config(), creationDate, expiryDate)
-	} else {
-		_, err = p.state.DB.Cluster.CreateStoragePoolVolume(projectName, volumeName, volumeDescription, volDBType, pool.ID(), vol.Config(), volDBContentType, creationDate)
-	}
+	err = p.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Create the database entry for the storage volume.
+		if snapshot {
+			_, err = tx.CreateStorageVolumeSnapshot(ctx, projectName, volumeName, volumeDescription, volDBType, pool.ID(), vol.Config(), creationDate, expiryDate)
+		} else {
+			_, err = tx.CreateStoragePoolVolume(ctx, projectName, volumeName, volumeDescription, volDBType, pool.ID(), vol.Config(), volDBContentType, creationDate)
+		}
 
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Error inserting volume %q for project %q in pool %q of type %q into database %q", volumeName, projectName, pool.Name(), volumeType, err)
 	}
@@ -307,7 +310,9 @@ func VolumeDBDelete(pool Pool, projectName string, volumeName string, volumeType
 		return err
 	}
 
-	err = p.state.DB.Cluster.RemoveStoragePoolVolume(projectName, volumeName, volDBType, pool.ID())
+	err = p.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.RemoveStoragePoolVolume(ctx, projectName, volumeName, volDBType, pool.ID())
+	})
 	if err != nil && !response.IsNotFoundError(err) {
 		return fmt.Errorf("Error deleting storage volume from database: %w", err)
 	}
@@ -327,7 +332,13 @@ func VolumeDBSnapshotsGet(pool Pool, projectName string, volume string, volumeTy
 		return nil, err
 	}
 
-	snapshots, err := p.state.DB.Cluster.GetLocalStoragePoolVolumeSnapshotsWithType(projectName, volume, volDBType, pool.ID())
+	var snapshots []db.StorageVolumeArgs
+
+	err = p.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		snapshots, err = tx.GetLocalStoragePoolVolumeSnapshotsWithType(ctx, projectName, volume, volDBType, pool.ID())
+
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -400,8 +411,14 @@ func BucketDBCreate(ctx context.Context, pool Pool, projectName string, memberSp
 		return -1, err
 	}
 
-	// Create the database entry for the storage bucket.
-	bucketID, err := p.state.DB.Cluster.CreateStoragePoolBucket(ctx, p.ID(), projectName, memberSpecific, *bucket)
+	var bucketID int64
+
+	err = p.state.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		// Create the database entry for the storage bucket.
+		bucketID, err = tx.CreateStoragePoolBucket(ctx, p.ID(), projectName, memberSpecific, *bucket)
+
+		return err
+	})
 	if err != nil {
 		return -1, fmt.Errorf("Failed inserting storage bucket %q for project %q in pool %q into database: %w", bucket.Name, projectName, pool.Name(), err)
 	}
@@ -416,7 +433,9 @@ func BucketDBDelete(ctx context.Context, pool Pool, bucketID int64) error {
 		return fmt.Errorf("Pool is not a lxdBackend")
 	}
 
-	err := p.state.DB.Cluster.DeleteStoragePoolBucket(ctx, p.ID(), bucketID)
+	err := p.state.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.DeleteStoragePoolBucket(ctx, p.ID(), bucketID)
+	})
 	if err != nil && !response.IsNotFoundError(err) {
 		return fmt.Errorf("Failed deleting storage bucket from database: %w", err)
 	}
@@ -430,20 +449,102 @@ func poolAndVolumeCommonRules(vol *drivers.Volume) map[string]func(string) error
 	rules := map[string]func(string) error{
 		// Note: size should not be modifiable for non-custom volumes and should be checked
 		// in the relevant volume update functions.
+
+		// lxdmeta:generate(entities=storage-btrfs,storage-lvm,storage-zfs; group=pool-conf; key=size)
+		//
+		// When creating loop-based pools, specify the size in bytes ({ref}`suffixes <instances-limit-units>` are supported).
+		// You can increase the size to grow the storage pool.
+		//
+		// The default (`auto`) creates a storage pool that uses 20% of the free disk space,
+		// with a minimum of 5 GiB and a maximum of 30 GiB.
+		// ---
+		//  type: string
+		//  defaultdesc: auto (20% of free disk space, >= 5 GiB and <= 30 GiB)
+		//  shortdesc: Size of the storage pool (for loop-based pools)
+
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs; group=volume-conf; key=size)
+		//
+		// ---
+		//  type: string
+		//  condition: appropriate driver
+		//  defaultdesc: same as `volume.size`
+		//  shortdesc: Size/quota of the storage volume
+
+		// lxdmeta:generate(entities=storage-cephobject; group=bucket-conf; key=size)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Quota of the storage bucket
+
+		// lxdmeta:generate(entities=storage-btrfs,storage-lvm,storage-zfs; group=bucket-conf; key=size)
+		//
+		// ---
+		//  type: string
+		//  condition: appropriate driver
+		//  defaultdesc: same as `volume.size`
+		//  shortdesc: Size/quota of the storage bucket
 		"size": validate.Optional(validate.IsSize),
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=snapshots.expiry)
+		// Specify an expression like `1M 2H 3d 4w 5m 6y`.
+		// ---
+		//  type: string
+		//  condition: custom volume
+		//  defaultdesc: same as `volume.snapshots.expiry`
+		//  shortdesc: When snapshots are to be deleted
 		"snapshots.expiry": func(value string) error {
 			// Validate expression
 			_, err := shared.GetExpiry(time.Time{}, value)
 			return err
 		},
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=snapshots.schedule)
+		// Specify either a cron expression (`<minute> <hour> <dom> <month> <dow>`), a comma-separated list of schedule aliases (`@hourly`, `@daily`, `@midnight`, `@weekly`, `@monthly`, `@annually`, `@yearly`), or leave empty to disable automatic snapshots (the default).
+		// ---
+		//  type: string
+		//  condition: custom volume
+		//  defaultdesc: same as `snapshots.schedule`
+		//  shortdesc: Schedule for automatic volume snapshots
 		"snapshots.schedule": validate.Optional(validate.IsCron([]string{"@hourly", "@daily", "@midnight", "@weekly", "@monthly", "@annually", "@yearly"})),
-		"snapshots.pattern":  validate.IsAny,
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=snapshots.pattern)
+		// You can specify a naming template that is used for scheduled snapshots and unnamed snapshots.
+		//
+		// {{snapshot_pattern_detail}}
+		// ---
+		//  type: string
+		//  condition: custom volume
+		//  defaultdesc: same as `volume.snapshots.pattern` or `snap%d`
+		//  shortdesc: Template for the snapshot name
+		"snapshots.pattern": validate.IsAny,
 	}
 
 	// security.shifted and security.unmapped are only relevant for custom filesystem volumes.
 	if (vol == nil) || (vol != nil && vol.Type() == drivers.VolumeTypeCustom && vol.ContentType() == drivers.ContentTypeFS) {
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=security.shifted)
+		// Enabling this option allows attaching the volume to multiple isolated instances.
+		// ---
+		//  type: bool
+		//  condition: custom volume
+		//  defaultdesc: same as `volume.security.shifted` or `false`
+		//  shortdesc: Enable ID shifting overlay
 		rules["security.shifted"] = validate.Optional(validate.IsBool)
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=security.unmapped)
+		//
+		// ---
+		//  type: bool
+		//  condition: custom volume
+		//  defaultdesc: same as `volume.security.unmappped` or `false`
+		//  shortdesc: Disable ID mapping for the volume
 		rules["security.unmapped"] = validate.Optional(validate.IsBool)
+	}
+
+	// Those keys are only valid for volumes.
+	if vol != nil {
+		// lxdmeta:generate(entities=storage-btrfs,storage-cephfs,storage-ceph,storage-dir,storage-lvm,storage-zfs,storage-powerflex; group=volume-conf; key=volatile.uuid)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: random UUID
+		//  shortdesc: The volume's UUID
+		rules["volatile.uuid"] = validate.Optional(validate.IsUUID)
 	}
 
 	return rules
@@ -452,11 +553,66 @@ func poolAndVolumeCommonRules(vol *drivers.Volume) map[string]func(string) error
 // validatePoolCommonRules returns a map of pool config rules common to all drivers.
 func validatePoolCommonRules() map[string]func(string) error {
 	rules := map[string]func(string) error{
-		"source":                  validate.IsAny,
+		// lxdmeta:generate(entities=storage-btrfs; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Path to an existing block device, loop file, or Btrfs subvolume
+
+		// lxdmeta:generate(entities=storage-cephfs; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Existing CephFS file system or file system path to use
+
+		// lxdmeta:generate(entities=storage-ceph; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Existing OSD storage pool to use
+
+		// lxdmeta:generate(entities=storage-dir; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Path to an existing directory
+
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Path to an existing block device, loop file, or LVM volume group
+
+		// lxdmeta:generate(entities=storage-zfs; group=pool-conf; key=source)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Path to an existing block device, loop file, or ZFS dataset/pool
+		"source": validate.IsAny,
+		// lxdmeta:generate(entities=storage-btrfs,storage-lvm,storage-zfs; group=pool-conf; key=source.wipe)
+		// Set this option to `true` to wipe the block device specified in `source`
+		// prior to creating the storage pool.
+		// ---
+		//  type: bool
+		//  defaultdesc: `false`
+		//  shortdesc: Whether to wipe the block device before creating the pool
 		"source.wipe":             validate.Optional(validate.IsBool),
 		"volatile.initial_source": validate.IsAny,
-		"rsync.bwlimit":           validate.Optional(validate.IsSize),
-		"rsync.compression":       validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=storage-dir,storage-lvm,storage-powerflex; group=pool-conf; key=rsync.bwlimit)
+		// When `rsync` must be used to transfer storage entities, this option specifies the upper limit
+		// to be placed on the socket I/O.
+		// ---
+		//  type: string
+		//  defaultdesc: `0` (no limit)
+		//  shortdesc: Upper limit on the socket I/O for `rsync`
+		"rsync.bwlimit": validate.Optional(validate.IsSize),
+		// lxdmeta:generate(entities=storage-dir,storage-lvm,storage-powerflex; group=pool-conf; key=rsync.compression)
+		//
+		// ---
+		//  type: bool
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to use compression while migrating storage pools
+		"rsync.compression": validate.Optional(validate.IsBool),
 	}
 
 	// Add to pool config rules (prefixed with volume.*) which are common for pool and volume.
@@ -834,59 +990,61 @@ func VolumeUsedByInstanceDevices(s *state.State, poolName string, projectName st
 		return err
 	}
 
-	return s.DB.Cluster.InstanceList(context.TODO(), func(inst db.InstanceArgs, p api.Project) error {
-		// If the volume has a specific cluster member which is different than the instance then skip as
-		// instance cannot be using this volume.
-		if vol.Location != "" && inst.Node != vol.Location {
-			return nil
-		}
-
-		instStorageProject := project.StorageVolumeProjectFromRecord(&p, volumeType)
-		if err != nil {
-			return err
-		}
-
-		// Check instance's storage project is the same as the volume's project.
-		// If not then the volume names mentioned in the instance's config cannot be referring to volumes
-		// in the volume's project we are trying to match, and this instance cannot possibly be using it.
-		if projectName != instStorageProject {
-			return nil
-		}
-
-		// Use local devices for usage check by if expandDevices is false (but don't modify instance).
-		devices := inst.Devices
-
-		// Expand devices for usage check if expandDevices is true.
-		if expandDevices {
-			devices = db.ExpandInstanceDevices(devices.Clone(), inst.Profiles)
-		}
-
-		var usedByDevices []string
-
-		// Iterate through each of the instance's devices, looking for disks in the same pool as volume.
-		// Then try and match the volume name against the instance device's "source" property.
-		for devName, dev := range devices {
-			if dev["type"] != "disk" {
-				continue
+	return s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(inst db.InstanceArgs, p api.Project) error {
+			// If the volume has a specific cluster member which is different than the instance then skip as
+			// instance cannot be using this volume.
+			if vol.Location != "" && inst.Node != vol.Location {
+				return nil
 			}
 
-			if dev["pool"] != poolName {
-				continue
-			}
-
-			if dev["source"] == vol.Name {
-				usedByDevices = append(usedByDevices, devName)
-			}
-		}
-
-		if len(usedByDevices) > 0 {
-			err = instanceFunc(inst, p, usedByDevices)
+			instStorageProject := project.StorageVolumeProjectFromRecord(&p, volumeType)
 			if err != nil {
 				return err
 			}
-		}
 
-		return nil
+			// Check instance's storage project is the same as the volume's project.
+			// If not then the volume names mentioned in the instance's config cannot be referring to volumes
+			// in the volume's project we are trying to match, and this instance cannot possibly be using it.
+			if projectName != instStorageProject {
+				return nil
+			}
+
+			// Use local devices for usage check by if expandDevices is false (but don't modify instance).
+			devices := inst.Devices
+
+			// Expand devices for usage check if expandDevices is true.
+			if expandDevices {
+				devices = instancetype.ExpandInstanceDevices(devices.Clone(), inst.Profiles)
+			}
+
+			var usedByDevices []string
+
+			// Iterate through each of the instance's devices, looking for disks in the same pool as volume.
+			// Then try and match the volume name against the instance device's "source" property.
+			for devName, dev := range devices {
+				if dev["type"] != "disk" {
+					continue
+				}
+
+				if dev["pool"] != poolName {
+					continue
+				}
+
+				if dev["source"] == vol.Name {
+					usedByDevices = append(usedByDevices, devName)
+				}
+			}
+
+			if len(usedByDevices) > 0 {
+				err = instanceFunc(inst, p, usedByDevices)
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
 	})
 }
 
@@ -1090,4 +1248,17 @@ func CompareSnapshots(sourceSnapshots []ComparableSnapshot, targetSnapshots []Co
 	}
 
 	return syncFromSource, deleteFromTarget
+}
+
+// ValidVolumeName validates a volume name.
+func ValidVolumeName(volumeName string) error {
+	if volumeName == "" {
+		return fmt.Errorf("Invalid volume name: Cannot be empty")
+	}
+
+	if strings.Contains(volumeName, shared.SnapshotDelimiter) {
+		return fmt.Errorf("Invalid volume name %q: Cannot contain slashes", volumeName)
+	}
+
+	return nil
 }

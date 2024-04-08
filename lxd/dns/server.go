@@ -1,14 +1,15 @@
 package dns
 
 import (
+	"context"
 	"sync"
 
 	"github.com/miekg/dns"
 
 	"github.com/canonical/lxd/lxd/db"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // ZoneRetriever is a function which fetches a DNS zone.
@@ -50,7 +51,7 @@ func (s *Server) start(address string) error {
 	address = util.CanonicalNetworkAddress(address, 53)
 
 	// Setup the handler.
-	handler := dnsHandler{}
+	handler := &dnsHandler{}
 	handler.server = s
 
 	// Spawn the DNS server.
@@ -161,8 +162,16 @@ func (s *Server) updateTSIG() error {
 		return nil
 	}
 
-	// Get all the secrets.
-	secrets, err := s.db.GetNetworkZoneKeys()
+	var secrets map[string]string
+
+	err := s.db.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		// Get all the secrets.
+		secrets, err = tx.GetNetworkZoneKeys(ctx)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}

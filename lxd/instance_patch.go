@@ -16,6 +16,7 @@ import (
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance"
 	projecthelpers "github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
@@ -65,7 +66,7 @@ func instancePatch(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 
 	// Get the container
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
@@ -87,7 +88,11 @@ func instancePatch(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	unlock := instanceOperationLock(s.ShutdownCtx, projectName, name)
+	unlock, err := instanceOperationLock(s.ShutdownCtx, projectName, name)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
 	defer unlock()
 
 	c, err := instance.LoadByProjectAndName(s, projectName, name)
@@ -195,7 +200,7 @@ func instancePatch(d *Daemon, r *http.Request) response.Response {
 			apiProfiles = append(apiProfiles, *apiProfile)
 		}
 
-		return projecthelpers.AllowInstanceUpdate(tx, projectName, name, req, c.LocalConfig())
+		return projecthelpers.AllowInstanceUpdate(s.GlobalConfig, tx, projectName, name, req, c.LocalConfig())
 	})
 	if err != nil {
 		return response.SmartError(err)

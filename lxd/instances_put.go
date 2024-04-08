@@ -8,14 +8,16 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/operations"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
@@ -73,7 +75,7 @@ func coalesceErrors(local bool, errors map[string]error) error {
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func instancesPut(d *Daemon, r *http.Request) response.Response {
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 
 	// Don't mess with instances while in setup mode.
 	<-d.waitReady.Done()
@@ -93,7 +95,23 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	action := shared.InstanceAction(req.State.Action)
+	action := instancetype.InstanceAction(req.State.Action)
+
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanUpdateState, entity.TypeInstance)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	for _, inst := range c {
+		if inst.Project().Name != projectName {
+			continue
+		}
+
+		// Check permission for all instances so that we apply the state change to all or none.
+		if !userHasPermission(entity.InstanceURL(inst.Project().Name, inst.Name())) {
+			return response.Forbidden(nil)
+		}
+	}
 
 	var names []string
 	var instances []instance.Instance
@@ -103,27 +121,27 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 		}
 
 		switch action {
-		case shared.Freeze:
+		case instancetype.Freeze:
 			if !inst.IsRunning() {
 				continue
 			}
 
-		case shared.Restart:
+		case instancetype.Restart:
 			if !inst.IsRunning() {
 				continue
 			}
 
-		case shared.Start:
+		case instancetype.Start:
 			if inst.IsRunning() {
 				continue
 			}
 
-		case shared.Stop:
+		case instancetype.Stop:
 			if !inst.IsRunning() {
 				continue
 			}
 
-		case shared.Unfreeze:
+		case instancetype.Unfreeze:
 			if inst.IsRunning() {
 				continue
 			}
@@ -170,14 +188,8 @@ func instancesPut(d *Daemon, r *http.Request) response.Response {
 			return localAction(false)
 		}
 
-		// Check if clustered.
-		clustered, err := cluster.Enabled(s.DB.Node)
-		if err != nil {
-			return err
-		}
-
 		// If not clustered, return the local data.
-		if !clustered {
+		if !s.ServerClustered {
 			return localAction(true)
 		}
 

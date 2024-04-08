@@ -8,11 +8,9 @@ discourse: 14345
 ```{youtube} https://www.youtube.com/watch?v=F9GALjHtnUU
 ```
 
-LXD provides a tool (`lxd-migrate`) to create a LXD instance based on an existing disk or image.
+If you have an existing machine, either physical or virtual (VM or container), you can use the `lxd-migrate` tool to create a LXD instance based on your existing disk or image.
 
-You can run the tool on any Linux machine.
-It connects to a LXD server and creates a blank instance, which you can configure during or after the migration.
-The tool then copies the data from the disk or image that you provide to the instance.
+The tool copies the provided partition, disk or image to the LXD storage pool of the provided LXD server, sets up an instance using that storage and allows you to configure additional settings for the new instance.
 
 ```{note}
 If you want to configure your new instance during the migration process, set up the entities that you want your instance to use before starting the migration process.
@@ -60,7 +58,7 @@ The tool can create both containers and virtual machines:
 
 Complete the following steps to migrate an existing machine to a LXD instance:
 
-1. Download the [`bin.linux.lxd-migrate`](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxd-migrate) tool from the **Assets** section of the latest [LXD release](https://github.com/canonical/lxd/releases).
+1. Download the `bin.linux.lxd-migrate` tool ([`bin.linux.lxd-migrate.aarch64`](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxd-migrate.aarch64) or [`bin.linux.lxd-migrate.x86_64`](https://github.com/canonical/lxd/releases/latest/download/bin.linux.lxd-migrate.x86_64)) from the **Assets** section of the latest [LXD release](https://github.com/canonical/lxd/releases).
 1. Place the tool on the machine that you want to use to create the instance.
    Make it executable (usually by running `chmod u+x bin.linux.lxd-migrate`).
 1. Make sure that the machine has `rsync` installed.

@@ -20,6 +20,10 @@ const (
 	// CtxProtocol is the protocol field in request context.
 	CtxProtocol CtxKey = "protocol"
 
+	// CtxIdentityProviderGroups is the identity provider groups field in the request context.
+	// This contains groups defined by the identity provider if the identity authenticated with OIDC.
+	CtxIdentityProviderGroups CtxKey = "identity_provider_groups"
+
 	// CtxForwardedAddress is the forwarded address field in request context.
 	CtxForwardedAddress CtxKey = "forwarded_address"
 
@@ -28,6 +32,19 @@ const (
 
 	// CtxForwardedProtocol is the forwarded protocol field in request context.
 	CtxForwardedProtocol CtxKey = "forwarded_protocol"
+
+	// CtxForwardedIdentityProviderGroups is the identity provider groups field in the request context.
+	// This contains groups defined by the identity provider if the identity authenticated with OIDC on another cluster
+	// member.
+	CtxForwardedIdentityProviderGroups CtxKey = "identity_provider_groups"
+
+	// CtxEffectiveProjectName is used to indicate that the effective project of a resource is different from the project
+	// specified in the URL. (For example, if a project has `features.networks=false`, any networks in this project actually
+	// belong to the default project).
+	CtxEffectiveProjectName CtxKey = "effective_project_name"
+
+	// CtxTrusted is a boolean value that indicates whether the request was authenticated or not.
+	CtxTrusted CtxKey = "trusted"
 )
 
 // Headers.
@@ -40,4 +57,8 @@ const (
 
 	// HeaderForwardedProtocol is the forwarded protocol field in request header.
 	HeaderForwardedProtocol = "X-LXD-forwarded-protocol"
+
+	// HeaderForwardedIdentityProviderGroups is the forwarded identity provider groups field in request header.
+	// This will be a JSON marshalled []string.
+	HeaderForwardedIdentityProviderGroups = "X-LXD-forwarded-identity-provider-groups"
 )

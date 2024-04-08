@@ -381,7 +381,7 @@ func (c *ClusterTx) RenameNode(ctx context.Context, old string, new string) erro
 	}
 
 	if count != 0 {
-		return ErrAlreadyDefined
+		return api.StatusErrorf(http.StatusConflict, "A cluster member already exists with name %q", new)
 	}
 
 	stmt := `UPDATE nodes SET name=? WHERE name=?`
@@ -972,7 +972,7 @@ SELECT storage_volumes.name
   JOIN storage_pools ON storage_volumes.storage_pool_id=storage_pools.id
   WHERE storage_volumes.node_id=? AND storage_volumes.type=? AND storage_pools.driver NOT IN ('ceph', 'cephfs')
 `
-	volumes, err := query.SelectStrings(ctx, c.tx, sql, id, StoragePoolVolumeTypeCustom)
+	volumes, err := query.SelectStrings(ctx, c.tx, sql, id, cluster.StoragePoolVolumeTypeCustom)
 	if err != nil {
 		return "", fmt.Errorf("Failed to get custom volumes for node %d: %w", id, err)
 	}

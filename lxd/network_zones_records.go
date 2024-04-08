@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	clusterRequest "github.com/canonical/lxd/lxd/cluster/request"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/network/zone"
@@ -15,23 +16,24 @@ import (
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var networkZoneRecordsCmd = APIEndpoint{
 	Path: "network-zones/{zone}/records",
 
-	Get:  APIEndpointAction{Handler: networkZoneRecordsGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Post: APIEndpointAction{Handler: networkZoneRecordsPost, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Get:  APIEndpointAction{Handler: networkZoneRecordsGet, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanView, "zone")},
+	Post: APIEndpointAction{Handler: networkZoneRecordsPost, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
 }
 
 var networkZoneRecordCmd = APIEndpoint{
 	Path: "network-zones/{zone}/records/{name}",
 
-	Delete: APIEndpointAction{Handler: networkZoneRecordDelete, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Get:    APIEndpointAction{Handler: networkZoneRecordGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Put:    APIEndpointAction{Handler: networkZoneRecordPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Patch:  APIEndpointAction{Handler: networkZoneRecordPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Delete: APIEndpointAction{Handler: networkZoneRecordDelete, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
+	Get:    APIEndpointAction{Handler: networkZoneRecordGet, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanView, "zone")},
+	Put:    APIEndpointAction{Handler: networkZoneRecordPut, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
+	Patch:  APIEndpointAction{Handler: networkZoneRecordPut, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
 }
 
 // API endpoints.
@@ -131,7 +133,7 @@ var networkZoneRecordCmd = APIEndpoint{
 func networkZoneRecordsGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -207,7 +209,7 @@ func networkZoneRecordsGet(d *Daemon, r *http.Request) response.Response {
 func networkZoneRecordsPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -269,7 +271,7 @@ func networkZoneRecordsPost(d *Daemon, r *http.Request) response.Response {
 func networkZoneRecordDelete(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -344,7 +346,7 @@ func networkZoneRecordDelete(d *Daemon, r *http.Request) response.Response {
 func networkZoneRecordGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -446,7 +448,7 @@ func networkZoneRecordGet(d *Daemon, r *http.Request) response.Response {
 func networkZoneRecordPut(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}

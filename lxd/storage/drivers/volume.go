@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"os"
 
-	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/locking"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/refcount"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
 
@@ -98,6 +97,13 @@ type Volume struct {
 	mountCustomPath      string // Mount the filesystem volume at a custom location.
 	mountFilesystemProbe bool   // Probe filesystem type when mounting volume (when needed).
 	hasSource            bool   // Whether the volume is created from a source volume.
+	parentUUID           string // Set to the parent volume's volatile.uuid (if snapshot).
+}
+
+// VolumeCopy represents a volume and its snapshots for copy and refresh operations.
+type VolumeCopy struct {
+	Volume
+	Snapshots []Volume
 }
 
 // NewVolume instantiates a new Volume struct.
@@ -139,13 +145,31 @@ func (v Volume) ExpandedConfig(key string) string {
 }
 
 // NewSnapshot instantiates a new Volume struct representing a snapshot of the parent volume.
+// This creates a logical representation of the snapshot with the cloned config from its parent volume.
+// The parent's UUID is not included.
+// Load the snapshot from the database instead if you want to access its own UUID.
 func (v Volume) NewSnapshot(snapshotName string) (Volume, error) {
 	if v.IsSnapshot() {
 		return Volume{}, fmt.Errorf("Cannot create a snapshot volume from a snapshot")
 	}
 
+	// Deep copy the volume's config.
+	// A snapshot can have different config keys like its UUID.
+	// When instantiating a new snapshot from its parent volume,
+	// this ensures that modifications on the snapshots config
+	// aren't propagated to the parent volume.
+	snapConfig := make(map[string]string, len(v.config))
+	for key, value := range v.config {
+		if key == "volatile.uuid" {
+			// Don't copy the parent volume's UUID.
+			continue
+		}
+
+		snapConfig[key] = value
+	}
+
 	fullSnapName := GetSnapshotVolumeName(v.name, snapshotName)
-	vol := NewVolume(v.driver, v.pool, v.volType, v.contentType, fullSnapName, v.config, v.poolConfig)
+	vol := NewVolume(v.driver, v.pool, v.volType, v.contentType, fullSnapName, snapConfig, v.poolConfig)
 
 	// Propagate filesystem probe mode of parent volume.
 	vol.SetMountFilesystemProbe(v.mountFilesystemProbe)
@@ -179,7 +203,7 @@ func (v Volume) mountLockName() string {
 }
 
 // MountLock attempts to lock the mount lock for the volume and returns the UnlockFunc.
-func (v Volume) MountLock() locking.UnlockFunc {
+func (v Volume) MountLock() (locking.UnlockFunc, error) {
 	return locking.Lock(context.TODO(), v.mountLockName())
 }
 
@@ -347,33 +371,6 @@ func (v Volume) Snapshots(op *operations.Operation) ([]Volume, error) {
 	return snapVols, nil
 }
 
-// SnapshotsMatch checks that the snapshots, according to the storage driver, match those provided (although not
-// necessarily in the same order).
-func (v Volume) SnapshotsMatch(snapNames []string, op *operations.Operation) error {
-	if v.IsSnapshot() {
-		return fmt.Errorf("Volume is a snapshot")
-	}
-
-	snapshots, err := v.driver.VolumeSnapshots(v, op)
-	if err != nil {
-		return err
-	}
-
-	for _, snapName := range snapNames {
-		if !shared.ValueInSlice(snapName, snapshots) {
-			return fmt.Errorf("Snapshot %q expected but not in storage", snapName)
-		}
-	}
-
-	for _, snapshot := range snapshots {
-		if !shared.ValueInSlice(snapshot, snapNames) {
-			return fmt.Errorf("Snapshot %q in storage but not expected", snapshot)
-		}
-	}
-
-	return nil
-}
-
 // IsBlockBacked indicates whether storage device is block backed.
 func (v Volume) IsBlockBacked() bool {
 	return v.driver.isBlockBacked(v) || v.mountFilesystemProbe
@@ -416,7 +413,7 @@ func (v Volume) NewVMBlockFilesystemVolume() Volume {
 		newConf["size"] = v.config["size.state"]
 	} else {
 		// Fallback to the default VM filesystem size.
-		newConf["size"] = deviceConfig.DefaultVMBlockFilesystemSize
+		newConf["size"] = v.driver.Info().DefaultVMBlockFilesystemSize
 	}
 
 	vol := NewVolume(v.driver, v.pool, v.volType, ContentTypeFS, v.name, newConf, v.poolConfig)
@@ -563,6 +560,11 @@ func (v *Volume) SetHasSource(hasSource bool) {
 	v.hasSource = hasSource
 }
 
+// SetParentUUID sets the parent volume's UUID for snapshots.
+func (v *Volume) SetParentUUID(parentUUID string) {
+	v.parentUUID = parentUUID
+}
+
 // Clone returns a copy of the volume.
 func (v Volume) Clone() Volume {
 	// Copy the config map to avoid internal modifications affecting external state.
@@ -578,4 +580,21 @@ func (v Volume) Clone() Volume {
 	}
 
 	return NewVolume(v.driver, v.pool, v.volType, v.contentType, v.name, newConfig, newPoolConfig)
+}
+
+// NewVolumeCopy returns a container for copying a volume and its snapshots.
+func NewVolumeCopy(vol Volume, snapshots ...Volume) VolumeCopy {
+	modifiedSnapshots := make([]Volume, 0, len(snapshots))
+
+	// Set the parent volume's UUID for each snapshot.
+	// If the parent volume doesn't have an UUID it's a noop.
+	for _, snapshot := range snapshots {
+		snapshot.SetParentUUID(vol.config["volatile.uuid"])
+		modifiedSnapshots = append(modifiedSnapshots, snapshot)
+	}
+
+	return VolumeCopy{
+		Volume:    vol,
+		Snapshots: modifiedSnapshots,
+	}
 }

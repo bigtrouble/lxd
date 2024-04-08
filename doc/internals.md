@@ -3,8 +3,9 @@
 ```{filtered-toctree}
 :titlesonly:
 
-:diataxis:/daemon-behavior
 :diataxis:/environment
+:diataxis:/reference/uefi_variables
+:diataxis:/daemon-behavior
 :diataxis:/syscall-interception
 :diataxis:User namespace setup </userns-idmap>
 ```
@@ -26,5 +27,6 @@ How-to guides:
 :topical:/environment
 :topical:/syscall-interception
 :topical:User namespace setup </userns-idmap>
+:topical:/reference/uefi_variables
 :topical:Configuration option index </config-options>
 ```

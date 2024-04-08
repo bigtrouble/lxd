@@ -2,6 +2,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,11 +24,11 @@ import (
 	"github.com/canonical/lxd/lxd/network/openvswitch"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/resources"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // ovnNet defines an interface for accessing instance specific functions on OVN network.
@@ -391,7 +392,14 @@ func (d *nicOVN) Start() (*deviceConfig.RunConfig, error) {
 
 	// Load uplink network config.
 	uplinkNetworkName := d.network.Config()["network"]
-	_, uplink, _, err := d.state.DB.Cluster.GetNetworkInAnyState(project.Default, uplinkNetworkName)
+
+	var uplink *api.Network
+
+	err = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_, uplink, _, err = tx.GetNetworkInAnyState(ctx, api.ProjectDefaultName, uplinkNetworkName)
+
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("Failed to load uplink network %q: %w", uplinkNetworkName, err)
 	}
@@ -737,7 +745,16 @@ func (d *nicOVN) Update(oldDevices deviceConfig.Devices, isRunning bool) error {
 		if isRunning {
 			// Load uplink network config.
 			uplinkNetworkName := d.network.Config()["network"]
-			_, uplink, _, err := d.state.DB.Cluster.GetNetworkInAnyState(project.Default, uplinkNetworkName)
+
+			var uplink *api.Network
+
+			err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				var err error
+
+				_, uplink, _, err = tx.GetNetworkInAnyState(ctx, api.ProjectDefaultName, uplinkNetworkName)
+
+				return err
+			})
 			if err != nil {
 				return fmt.Errorf("Failed to load uplink network %q: %w", uplinkNetworkName, err)
 			}
@@ -855,15 +872,18 @@ func (d *nicOVN) Stop() (*deviceConfig.RunConfig, error) {
 		}
 	}
 
-	instanceUUID := d.inst.LocalConfig()["volatile.uuid"]
-	err = d.network.InstanceDevicePortStop(ovsExternalOVNPort, &network.OVNInstanceNICStopOpts{
-		InstanceUUID: instanceUUID,
-		DeviceName:   d.name,
-		DeviceConfig: d.config,
-	})
-	if err != nil {
-		// Don't fail here as we still want the postStop hook to run to clean up the local veth pair.
-		d.logger.Error("Failed to remove OVN device port", logger.Ctx{"err": err})
+	// If the devices config is invalid validateConfig() won't populate this field.
+	if d.network != nil {
+		instanceUUID := d.inst.LocalConfig()["volatile.uuid"]
+		err = d.network.InstanceDevicePortStop(ovsExternalOVNPort, &network.OVNInstanceNICStopOpts{
+			InstanceUUID: instanceUUID,
+			DeviceName:   d.name,
+			DeviceConfig: d.config,
+		})
+		if err != nil {
+			// Don't fail here as we still want the postStop hook to run to clean up the local veth pair.
+			d.logger.Error("Failed to remove OVN device port", logger.Ctx{"err": err})
+		}
 	}
 
 	// Remove BGP announcements.

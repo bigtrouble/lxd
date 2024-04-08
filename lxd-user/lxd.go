@@ -8,10 +8,10 @@ import (
 	"strings"
 
 	"github.com/canonical/lxd/client"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 func lxdIsConfigured(client lxd.InstanceServer) (bool, error) {
@@ -224,13 +224,11 @@ func lxdSetupUser(uid uint32) error {
 
 	// Add the certificate to the trust store.
 	err = client.CreateCertificate(api.CertificatesPost{
-		CertificatePut: api.CertificatePut{
-			Name:        fmt.Sprintf("lxd-user-%d", uid),
-			Type:        "client",
-			Restricted:  true,
-			Projects:    []string{projectName},
-			Certificate: base64.StdEncoding.EncodeToString(x509Cert.Raw),
-		},
+		Name:        fmt.Sprintf("lxd-user-%d", uid),
+		Type:        "client",
+		Restricted:  true,
+		Projects:    []string{projectName},
+		Certificate: base64.StdEncoding.EncodeToString(x509Cert.Raw),
 	})
 	if err != nil {
 		return fmt.Errorf("Unable to add user certificate: %w", err)

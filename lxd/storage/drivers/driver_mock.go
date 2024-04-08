@@ -4,11 +4,12 @@ import (
 	"io"
 
 	"github.com/canonical/lxd/lxd/backup"
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
+	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/instancewriter"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 type mock struct {
@@ -23,16 +24,17 @@ func (d *mock) load() error {
 // Info returns info about the driver and its environment.
 func (d *mock) Info() Info {
 	return Info{
-		Name:              "mock",
-		Version:           "1",
-		OptimizedImages:   false,
-		PreservesInodes:   false,
-		Remote:            d.isRemote(),
-		VolumeTypes:       []VolumeType{VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
-		BlockBacking:      false,
-		RunningCopyFreeze: true,
-		DirectIO:          true,
-		MountedRoot:       true,
+		Name:                         "mock",
+		Version:                      "1",
+		DefaultVMBlockFilesystemSize: deviceConfig.DefaultVMBlockFilesystemSize,
+		OptimizedImages:              false,
+		PreservesInodes:              false,
+		Remote:                       d.isRemote(),
+		VolumeTypes:                  []VolumeType{VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
+		BlockBacking:                 false,
+		RunningCopyFreeze:            true,
+		DirectIO:                     true,
+		MountedRoot:                  true,
 	}
 }
 
@@ -79,22 +81,22 @@ func (d *mock) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Ope
 }
 
 // CreateVolumeFromBackup restores a backup tarball onto the storage device.
-func (d *mock) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
+func (d *mock) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
 	return nil, nil, nil
 }
 
 // CreateVolumeFromCopy provides same-pool volume copying functionality.
-func (d *mock) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, allowInconsistent bool, op *operations.Operation) error {
+func (d *mock) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, op *operations.Operation) error {
 	return nil
 }
 
 // CreateVolumeFromMigration creates a volume being sent via a migration.
-func (d *mock) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
+func (d *mock) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
 	return nil
 }
 
 // RefreshVolume provides same-pool volume and specific snapshots syncing functionality.
-func (d *mock) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, allowInconsistent bool, op *operations.Operation) error {
+func (d *mock) RefreshVolume(vol VolumeCopy, srcVol VolumeCopy, refreshSnapshots []string, allowInconsistent bool, op *operations.Operation) error {
 	return nil
 }
 
@@ -168,13 +170,13 @@ func (d *mock) RenameVolume(vol Volume, newVolName string, op *operations.Operat
 }
 
 // MigrateVolume sends a volume for migration.
-func (d *mock) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
+func (d *mock) MigrateVolume(vol VolumeCopy, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
 	return nil
 }
 
 // BackupVolume copies a volume (and optionally its snapshots) to a specified target path.
 // This driver does not support optimized backups.
-func (d *mock) BackupVolume(vol Volume, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
+func (d *mock) BackupVolume(vol VolumeCopy, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
 	return nil
 }
 
@@ -205,7 +207,7 @@ func (d *mock) VolumeSnapshots(vol Volume, op *operations.Operation) ([]string, 
 }
 
 // RestoreVolume restores a volume from a snapshot.
-func (d *mock) RestoreVolume(vol Volume, snapshotName string, op *operations.Operation) error {
+func (d *mock) RestoreVolume(vol Volume, snapVol Volume, op *operations.Operation) error {
 	return nil
 }
 

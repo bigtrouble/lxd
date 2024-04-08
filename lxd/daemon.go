@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,15 +20,15 @@ import (
 
 	dqliteClient "github.com/canonical/go-dqlite/client"
 	"github.com/canonical/go-dqlite/driver"
-	"github.com/go-macaroon-bakery/macaroon-bakery/v3/bakery"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	liblxc "github.com/lxc/go-lxc"
 	"golang.org/x/sys/unix"
 
+	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/acme"
 	"github.com/canonical/lxd/lxd/apparmor"
 	"github.com/canonical/lxd/lxd/auth"
-	"github.com/canonical/lxd/lxd/auth/candid"
 	"github.com/canonical/lxd/lxd/auth/oidc"
 	"github.com/canonical/lxd/lxd/bgp"
 	"github.com/canonical/lxd/lxd/cluster"
@@ -42,16 +42,18 @@ import (
 	"github.com/canonical/lxd/lxd/events"
 	"github.com/canonical/lxd/lxd/firewall"
 	"github.com/canonical/lxd/lxd/fsmonitor"
+	"github.com/canonical/lxd/lxd/identity"
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/instance"
 	instanceDrivers "github.com/canonical/lxd/lxd/instance/drivers"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
+	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/loki"
 	"github.com/canonical/lxd/lxd/maas"
 	networkZone "github.com/canonical/lxd/lxd/network/zone"
 	"github.com/canonical/lxd/lxd/node"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/rsync"
 	scriptletLoad "github.com/canonical/lxd/lxd/scriptlet/load"
 	"github.com/canonical/lxd/lxd/seccomp"
@@ -66,21 +68,22 @@ import (
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/lxd/warnings"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/cancel"
-	"github.com/canonical/lxd/shared/idmap"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
 
 // A Daemon can respond to requests from a shared client.
 type Daemon struct {
-	clientCerts *certificateCache
-	os          *sys.OS
-	db          *db.DB
-	firewall    firewall.Firewall
-	maas        *maas.Controller
-	bgp         *bgp.Server
-	dns         *dns.Server
+	identityCache *identity.Cache
+	os            *sys.OS
+	db            *db.DB
+	firewall      firewall.Firewall
+	maas          *maas.Controller
+	bgp           *bgp.Server
+	dns           *dns.Server
 
 	// Event servers
 	devlxdEvents     *events.DevLXDServer
@@ -109,8 +112,7 @@ type Daemon struct {
 
 	proxy func(req *http.Request) (*url.URL, error)
 
-	candidVerifier *candid.Verifier
-	oidcVerifier   *oidc.Verifier
+	oidcVerifier *oidc.Verifier
 
 	// Stores last heartbeat node information to detect node changes.
 	lastNodeList *cluster.APIHeartbeat
@@ -141,7 +143,11 @@ type Daemon struct {
 	globalConfigMu sync.Mutex
 
 	// Cluster.
-	serverName string
+	serverName      string
+	serverClustered bool
+
+	// Server's UUID from file.
+	serverUUID string
 
 	lokiClient *loki.Client
 
@@ -170,7 +176,7 @@ func newDaemon(config *DaemonConfig, os *sys.OS) *Daemon {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 
 	d := &Daemon{
-		clientCerts:    &certificateCache{},
+		identityCache:  &identity.Cache{},
 		config:         config,
 		devlxdEvents:   devlxdEvents,
 		events:         lxdEvents,
@@ -230,74 +236,81 @@ type APIEndpointAction struct {
 	AllowUntrusted bool
 }
 
-// allowAuthenticated is an AccessHandler which allows all requests.
-// This function doesn't do anything itself, except return the EmptySyncResponse that allows the request to
-// proceed. However in order to access any API route you must be authenticated, unless the handler's AllowUntrusted
-// property is set to true or you are an admin.
-func allowAuthenticated(d *Daemon, r *http.Request) response.Response {
-	return response.EmptySyncResponse
+// allowAuthenticated is an AccessHandler which allows only authenticated requests. This should be used in conjunction
+// with further access control within the handler (e.g. to filter resources the user is able to view/edit).
+func allowAuthenticated(_ *Daemon, r *http.Request) response.Response {
+	trusted, err := request.GetCtxValue[bool](r.Context(), request.CtxTrusted)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	if trusted {
+		return response.EmptySyncResponse
+	}
+
+	return response.Forbidden(nil)
 }
 
-// allowProjectPermission is a wrapper to check access against the project, its features and RBAC permission.
-func allowProjectPermission(feature string, permission string) func(d *Daemon, r *http.Request) response.Response {
+// allowPermission is a wrapper to check access against a given object, an object being an image, instance, network, etc.
+// Mux vars should be passed in so that the object we are checking can be created. For example, a certificate object requires
+// a fingerprint, the mux var for certificate fingerprints is "fingerprint", so that string should be passed in.
+// Mux vars should always be passed in with the same order they appear in the API route.
+func allowPermission(entityType entity.Type, entitlement auth.Entitlement, muxVars ...string) func(d *Daemon, r *http.Request) response.Response {
 	return func(d *Daemon, r *http.Request) response.Response {
 		s := d.State()
+		var err error
+		var entityURL *api.URL
+		if entityType == entity.TypeServer {
+			// For server permission checks, skip mux var logic.
+			entityURL = entity.ServerURL()
+		} else if entityType == entity.TypeProject && len(muxVars) == 0 {
+			// If we're checking project permissions on a non-project endpoint (e.g. `can_create_instances` on POST /1.0/instances)
+			// we get the project name from the query parameter.
+			// If we're checking project permissions on a project endpoint, we expect to get the project name from its path variable
+			// in the next else block.
+			entityURL = entity.ProjectURL(request.ProjectParam(r))
+		} else {
+			muxValues := make([]string, 0, len(muxVars))
+			vars := mux.Vars(r)
+			for _, muxVar := range muxVars {
+				muxValue := vars[muxVar]
+				if muxValue == "" {
+					return response.InternalError(fmt.Errorf("Failed to perform permission check: Path argument label %q not found in request URL %q", muxVar, r.URL))
+				}
 
-		// Shortcut for speed
-		if s.Authorizer.UserIsAdmin(r) {
-			return response.EmptySyncResponse
+				muxValues = append(muxValues, muxValue)
+			}
+
+			entityURL, err = entityType.URL(request.QueryParam(r, "project"), request.QueryParam(r, "target"), muxValues...)
+			if err != nil {
+				return response.InternalError(fmt.Errorf("Failed to perform permission check: %w", err))
+			}
 		}
 
-		// Get the project
-		projectName := projectParam(r)
-
 		// Validate whether the user has the needed permission
-		if !s.Authorizer.UserHasPermission(r, projectName, permission) {
-			return response.Forbidden(nil)
+		err = s.Authorizer.CheckPermission(r.Context(), r, entityURL, entitlement)
+		if err != nil {
+			return response.SmartError(err)
 		}
 
 		return response.EmptySyncResponse
 	}
 }
 
-// Convenience function around Authenticate.
-func (d *Daemon) checkTrustedClient(r *http.Request) error {
-	trusted, _, _, err := d.Authenticate(nil, r)
-	if !trusted || err != nil {
-		if err != nil {
-			return err
-		}
-
-		return fmt.Errorf("Not authorized")
-	}
-
-	return nil
-}
-
-// getTrustedCertificates returns trusted certificates key on DB type and fingerprint.
-func (d *Daemon) getTrustedCertificates() map[dbCluster.CertificateType]map[string]x509.Certificate {
-	d.clientCerts.Lock.Lock()
-	defer d.clientCerts.Lock.Unlock()
-
-	return d.clientCerts.Certificates
-}
-
 // Authenticate validates an incoming http Request
 // It will check over what protocol it came, what type of request it is and
-// will validate the TLS certificate or Macaroon.
+// will validate the TLS certificate or OIDC token.
 //
 // This does not perform authorization, only validates authentication.
 // Returns whether trusted or not, the username (or certificate fingerprint) of the trusted client, and the type of
-// client that has been authenticated (cluster, unix, candid or tls).
-func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, string, string, error) {
-	trustedCerts := d.getTrustedCertificates()
-
+// client that has been authenticated (cluster, unix, oidc or tls).
+func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (trusted bool, username string, method string, identityProviderGroups []string, err error) {
 	// Allow internal cluster traffic by checking against the trusted certfificates.
 	if r.TLS != nil {
 		for _, i := range r.TLS.PeerCertificates {
-			trusted, fingerprint := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeServer], d.endpoints.NetworkCert(), false)
+			trusted, fingerprint := util.CheckTrustState(*i, d.identityCache.X509Certificates(api.IdentityTypeCertificateServer), d.endpoints.NetworkCert(), false)
 			if trusted {
-				return true, fingerprint, "cluster", nil
+				return true, fingerprint, "cluster", nil, nil
 			}
 		}
 	}
@@ -307,55 +320,47 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 		if w != nil {
 			cred, err := ucred.GetCredFromContext(r.Context())
 			if err != nil {
-				return false, "", "", err
+				return false, "", "", nil, err
 			}
 
 			u, err := user.LookupId(fmt.Sprintf("%d", cred.Uid))
 			if err != nil {
-				return true, fmt.Sprintf("uid=%d", cred.Uid), "unix", nil
+				return true, fmt.Sprintf("uid=%d", cred.Uid), "unix", nil, nil
 			}
 
-			return true, u.Username, "unix", nil
+			return true, u.Username, "unix", nil, nil
 		}
 
-		return true, "", "unix", nil
+		return true, "", "unix", nil, nil
 	}
 
 	// Devlxd unix socket credentials on main API.
 	if r.RemoteAddr == "@devlxd" {
-		return false, "", "", fmt.Errorf("Main API query can't come from /dev/lxd socket")
+		return false, "", "", nil, fmt.Errorf("Main API query can't come from /dev/lxd socket")
 	}
 
 	// Cluster notification with wrong certificate.
 	if isClusterNotification(r) {
-		return false, "", "", fmt.Errorf("Cluster notification isn't using trusted server certificate")
+		return false, "", "", nil, fmt.Errorf("Cluster notification isn't using trusted server certificate")
 	}
 
 	// Bad query, no TLS found.
 	if r.TLS == nil {
-		return false, "", "", fmt.Errorf("Bad/missing TLS on network query")
+		return false, "", "", nil, fmt.Errorf("Bad/missing TLS on network query")
 	}
 
 	if d.oidcVerifier != nil && d.oidcVerifier.IsRequest(r) {
-		userName, err := d.oidcVerifier.Auth(d.shutdownCtx, w, r)
+		result, err := d.oidcVerifier.Auth(d.shutdownCtx, w, r)
 		if err != nil {
-			return false, "", "", err
+			return false, "", "", nil, fmt.Errorf("Failed OIDC Authentication: %w", err)
 		}
 
-		return true, userName, "oidc", nil
-	} else if d.candidVerifier != nil && d.candidVerifier.IsRequest(r) {
-		info, err := d.candidVerifier.Auth(r)
+		err = d.handleOIDCAuthenticationResult(r, result)
 		if err != nil {
-			return false, "", "", err
+			return false, "", "", nil, fmt.Errorf("Failed to process OIDC authentication result: %w", err)
 		}
 
-		if info != nil && info.Identity != nil {
-			// Valid identity macaroon found.
-			return true, info.Identity.Id(), "candid", nil
-		}
-
-		// Valid macaroon with no identity information.
-		return true, "", "candid", nil
+		return true, result.Email, api.AuthenticationMethodOIDC, result.IdentityProviderGroups, nil
 	}
 
 	// Validate normal TLS access.
@@ -364,22 +369,104 @@ func (d *Daemon) Authenticate(w http.ResponseWriter, r *http.Request) (bool, str
 	// Validate metrics certificates.
 	if r.URL.Path == "/1.0/metrics" {
 		for _, i := range r.TLS.PeerCertificates {
-			trusted, username := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeMetrics], d.endpoints.NetworkCert(), trustCACertificates)
+			trusted, username := util.CheckTrustState(*i, d.identityCache.X509Certificates(api.IdentityTypeCertificateMetricsRestricted, api.IdentityTypeCertificateMetricsUnrestricted), d.endpoints.NetworkCert(), trustCACertificates)
 			if trusted {
-				return true, username, "tls", nil
+				return true, username, api.AuthenticationMethodTLS, nil, nil
 			}
 		}
 	}
 
 	for _, i := range r.TLS.PeerCertificates {
-		trusted, username := util.CheckTrustState(*i, trustedCerts[dbCluster.CertificateTypeClient], d.endpoints.NetworkCert(), trustCACertificates)
+		trusted, username := util.CheckTrustState(*i, d.identityCache.X509Certificates(api.IdentityTypeCertificateClientRestricted, api.IdentityTypeCertificateClientUnrestricted), d.endpoints.NetworkCert(), trustCACertificates)
 		if trusted {
-			return true, username, "tls", nil
+			return true, username, api.AuthenticationMethodTLS, nil, nil
 		}
 	}
 
 	// Reject unauthorized.
-	return false, "", "", nil
+	return false, "", "", nil, nil
+}
+
+// handleOIDCAuthenticationResult checks the identity cache for the OIDC identity by their email address. If no identity
+// is found, an identity is added with that email. If an identity is found but the OIDC subject is different to the
+// expected value, the identity is updated with the new subject.
+func (d *Daemon) handleOIDCAuthenticationResult(r *http.Request, result *oidc.AuthenticationResult) error {
+	var action lifecycle.IdentityAction
+
+	id, err := d.identityCache.Get(api.AuthenticationMethodOIDC, result.Email)
+	if err != nil && !api.StatusErrorCheck(err, http.StatusNotFound) {
+		return fmt.Errorf("Failed getting OIDC identity from cache: %w", err)
+	} else if err != nil {
+		// Identity not found. Add it to the database and refresh the identity cache.
+		idMetadata := dbCluster.OIDCMetadata{Subject: result.Subject}
+		b, err := json.Marshal(idMetadata)
+		if err != nil {
+			return fmt.Errorf("Failed to marshal OIDC identity metadata: %w", err)
+		}
+
+		err = d.db.Cluster.Transaction(d.shutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
+			_, err := dbCluster.CreateIdentity(ctx, tx.Tx(), dbCluster.Identity{
+				AuthMethod: api.AuthenticationMethodOIDC,
+				Type:       api.IdentityTypeOIDCClient,
+				Identifier: result.Email,
+				Name:       result.Name,
+				Metadata:   string(b),
+			})
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("Failed to add new OIDC identity to database: %w", err)
+		}
+
+		action = lifecycle.IdentityCreated
+	} else if id.Subject != result.Subject || id.Name != result.Name {
+		// The OIDC subject of the user with this email address has changed (this should be rare). Replace the
+		// subject in the identity metadata and refresh the cache.
+		idMetadata := dbCluster.OIDCMetadata{Subject: result.Subject}
+		b, err := json.Marshal(idMetadata)
+		if err != nil {
+			return fmt.Errorf("Failed to marshal OIDC identity metadata: %w", err)
+		}
+
+		err = d.db.Cluster.Transaction(d.shutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
+			return dbCluster.UpdateIdentity(ctx, tx.Tx(), api.AuthenticationMethodOIDC, result.Email, dbCluster.Identity{
+				AuthMethod: api.AuthenticationMethodOIDC,
+				Type:       api.IdentityTypeOIDCClient,
+				Identifier: result.Email,
+				Name:       result.Name,
+				Metadata:   string(b),
+			})
+		})
+		if err != nil {
+			return fmt.Errorf("Failed to update OIDC identity information: %w", err)
+		}
+
+		action = lifecycle.IdentityUpdated
+	}
+
+	if action != "" {
+		// Notify other nodes about the new identity.
+		s := d.State()
+		notifier, err := cluster.NewNotifier(s, s.Endpoints.NetworkCert(), s.ServerCert(), cluster.NotifyAlive)
+		if err != nil {
+			return fmt.Errorf("Failed to notify cluster members of new or updated OIDC identity: %w", err)
+		}
+
+		err = notifier(func(client lxd.InstanceServer) error {
+			_, _, err := client.RawQuery(http.MethodPost, "/internal/identity-cache-refresh", nil, "")
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("Failed to notify cluster members of new or updated OIDC identity: %w", err)
+		}
+
+		lc := action.Event(api.AuthenticationMethodOIDC, result.Email, request.CreateRequestor(r), nil)
+		s.Events.SendLifecycle(api.ProjectDefaultName, lc)
+
+		s.UpdateIdentityCache()
+	}
+
+	return nil
 }
 
 // State creates a new State instance linked to our internal db and os.
@@ -401,26 +488,28 @@ func (d *Daemon) State() *state.State {
 	d.globalConfigMu.Unlock()
 
 	return &state.State{
-		ShutdownCtx:            d.shutdownCtx,
-		DB:                     d.db,
-		MAAS:                   d.maas,
-		BGP:                    d.bgp,
-		DNS:                    d.dns,
-		OS:                     d.os,
-		Endpoints:              d.endpoints,
-		Events:                 d.events,
-		DevlxdEvents:           d.devlxdEvents,
-		Firewall:               d.firewall,
-		Proxy:                  d.proxy,
-		ServerCert:             d.serverCert,
-		UpdateCertificateCache: func() { updateCertificateCache(d) },
-		InstanceTypes:          instanceTypes,
-		DevMonitor:             d.devmonitor,
-		GlobalConfig:           globalConfig,
-		LocalConfig:            localConfig,
-		ServerName:             d.serverName,
-		StartTime:              d.startTime,
-		Authorizer:             d.authorizer,
+		ShutdownCtx:         d.shutdownCtx,
+		DB:                  d.db,
+		MAAS:                d.maas,
+		BGP:                 d.bgp,
+		DNS:                 d.dns,
+		OS:                  d.os,
+		Endpoints:           d.endpoints,
+		Events:              d.events,
+		DevlxdEvents:        d.devlxdEvents,
+		Firewall:            d.firewall,
+		Proxy:               d.proxy,
+		ServerCert:          d.serverCert,
+		UpdateIdentityCache: func() { updateIdentityCache(d) },
+		InstanceTypes:       instanceTypes,
+		DevMonitor:          d.devmonitor,
+		GlobalConfig:        globalConfig,
+		LocalConfig:         localConfig,
+		ServerName:          d.serverName,
+		ServerClustered:     d.serverClustered,
+		ServerUUID:          d.serverUUID,
+		StartTime:           d.startTime,
+		Authorizer:          d.authorizer,
 	}
 }
 
@@ -461,31 +550,32 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 		}
 
 		// Authentication
-		trusted, username, protocol, err := d.Authenticate(w, r)
+		trusted, username, protocol, identityProviderGroups, err := d.Authenticate(w, r)
 		if err != nil {
-			_, ok := err.(*oidc.AuthError)
-			if ok {
+			var authError oidc.AuthError
+			if errors.As(err, &authError) {
 				// Ensure the OIDC headers are set if needed.
 				if d.oidcVerifier != nil {
 					_ = d.oidcVerifier.WriteHeaders(w)
 				}
 
+				// Return 401 Unauthorized error. This indicates to the client that it needs to use the
+				// headers we've set above to get an access token and try again.
 				_ = response.Unauthorized(err).Render(w)
 				return
 			}
 
-			// If not a macaroon discharge request, return the error
-			_, ok = err.(*bakery.DischargeRequiredError)
-			if !ok {
-				_ = response.InternalError(err).Render(w)
-				return
-			}
+			_ = response.Forbidden(err).Render(w)
+			return
 		}
+
+		// Set the "trusted" value in the request context.
+		request.SetCtxValue(r, request.CtxTrusted, trusted)
 
 		// Reject internal queries to remote, non-cluster, clients
 		if version == "internal" && !shared.ValueInSlice(protocol, []string{"unix", "cluster"}) {
 			// Except for the initial cluster accept request (done over trusted TLS)
-			if !trusted || c.Path != "cluster/accept" || protocol != "tls" {
+			if !trusted || c.Path != "cluster/accept" || protocol != api.AuthenticationMethodTLS {
 				logger.Warn("Rejecting remote internal API request", logger.Ctx{"ip": r.RemoteAddr})
 				_ = response.Forbidden(nil).Render(w)
 				return
@@ -503,69 +593,12 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 		if trusted {
 			logger.Debug("Handling API request", logCtx)
 
-			// Get user access data.
-			userAccess, err := func() (*auth.UserAccess, error) {
-				ua := &auth.UserAccess{}
-				ua.Admin = true
-
-				// Internal cluster communications.
-				if protocol == "cluster" {
-					return ua, nil
-				}
-
-				// Regular TLS clients.
-				if protocol == "tls" {
-					d.clientCerts.Lock.Lock()
-					certProjects := d.clientCerts.Projects
-					d.clientCerts.Lock.Unlock()
-
-					// Check if we have restrictions on the key.
-					if certProjects != nil {
-						projects, ok := certProjects[username]
-						if ok {
-							ua.Admin = false
-							ua.Projects = map[string][]string{}
-							for _, projectName := range projects {
-								ua.Projects[projectName] = []string{
-									"view",
-									"manage-containers",
-									"manage-images",
-									"manage-networks",
-									"manage-profiles",
-									"manage-storage-volumes",
-									"operate-containers",
-								}
-							}
-						}
-					}
-
-					return ua, nil
-				}
-
-				// If no external authentication configured, we're done now.
-				if d.candidVerifier == nil || r.RemoteAddr == "@" {
-					return ua, nil
-				}
-
-				// Validate RBAC permissions.
-				ua, err = d.authorizer.UserAccess(username)
-				if err != nil {
-					return nil, err
-				}
-
-				return ua, nil
-			}()
-			if err != nil {
-				logCtx["err"] = err
-				logger.Warn("Rejecting remote API request", logCtx)
-				_ = response.Forbidden(nil).Render(w)
-				return
-			}
-
 			// Add authentication/authorization context data.
 			ctx := context.WithValue(r.Context(), request.CtxUsername, username)
 			ctx = context.WithValue(ctx, request.CtxProtocol, protocol)
-			ctx = context.WithValue(ctx, request.CtxAccess, userAccess)
+			if len(identityProviderGroups) > 0 {
+				ctx = context.WithValue(ctx, request.CtxIdentityProviderGroups, identityProviderGroups)
+			}
 
 			// Add forwarded requestor data.
 			if protocol == "cluster" {
@@ -573,14 +606,21 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 				ctx = context.WithValue(ctx, request.CtxForwardedAddress, r.Header.Get(request.HeaderForwardedAddress))
 				ctx = context.WithValue(ctx, request.CtxForwardedUsername, r.Header.Get(request.HeaderForwardedUsername))
 				ctx = context.WithValue(ctx, request.CtxForwardedProtocol, r.Header.Get(request.HeaderForwardedProtocol))
+				forwardedIdentityProviderGroupsJSON := r.Header.Get(request.HeaderForwardedIdentityProviderGroups)
+				if forwardedIdentityProviderGroupsJSON != "" {
+					var forwardedIdentityProviderGroups []string
+					err = json.Unmarshal([]byte(forwardedIdentityProviderGroupsJSON), &forwardedIdentityProviderGroups)
+					if err != nil {
+						logger.Error("Failed unmarshalling identity provider groups from forwarded request header", logger.Ctx{"error": err})
+					} else {
+						ctx = context.WithValue(ctx, request.CtxForwardedIdentityProviderGroups, forwardedIdentityProviderGroups)
+					}
+				}
 			}
 
 			r = r.WithContext(ctx)
 		} else if untrustedOk && r.Header.Get("X-LXD-authenticated") == "" {
 			logger.Debug(fmt.Sprintf("Allowing untrusted %s", r.Method), logger.Ctx{"url": r.URL.RequestURI(), "ip": r.RemoteAddr})
-		} else if derr, ok := err.(*bakery.DischargeRequiredError); ok {
-			d.candidVerifier.WriteRequest(r, w, derr)
-			return
 		} else {
 			if d.oidcVerifier != nil {
 				_ = d.oidcVerifier.WriteHeaders(w)
@@ -642,16 +682,21 @@ func (d *Daemon) createCmd(restAPI *mux.Router, version string, c APIEndpoint) {
 				return response.NotImplemented(nil)
 			}
 
+			// All APIEndpointActions should have an access handler or should allow untrusted requests.
+			if action.AccessHandler == nil && !action.AllowUntrusted {
+				return response.InternalError(fmt.Errorf("Access handler not defined for %s %s", r.Method, r.URL.RequestURI()))
+			}
+
+			// If the request is not trusted, only call the handler if the action allows it.
+			if !trusted && !action.AllowUntrusted {
+				return response.Forbidden(errors.New("You must be authenticated"))
+			}
+
+			// Call the access handler if there is one.
 			if action.AccessHandler != nil {
-				// Defer access control to custom handler
 				resp := action.AccessHandler(d, r)
 				if resp != response.EmptySyncResponse {
 					return resp
-				}
-			} else if !action.AllowUntrusted {
-				// Require admin privileges
-				if !d.authorizer.UserIsAdmin(r) {
-					return response.Forbidden(nil)
 				}
 			}
 
@@ -748,22 +793,32 @@ func (d *Daemon) Init() error {
 	return nil
 }
 
-func (d *Daemon) setupLoki(URL string, cert string, key string, caCert string, labels []string, logLevel string, types []string) error {
+func (d *Daemon) setupLoki(URL string, cert string, key string, caCert string, instanceName string, logLevel string, labels []string, types []string) error {
+	// Stop any existing loki client.
 	if d.lokiClient != nil {
 		d.lokiClient.Stop()
 	}
 
+	// Check basic requirements for starting a new client.
 	if URL == "" || logLevel == "" || len(types) == 0 {
 		return nil
 	}
 
+	// Validate the URL.
 	u, err := url.Parse(URL)
 	if err != nil {
 		return err
 	}
 
-	d.lokiClient = loki.NewClient(d.shutdownCtx, u, cert, key, caCert, labels, logLevel, types)
+	// Figure out the instance name.
+	if instanceName == "" {
+		instanceName = d.serverName
+	}
 
+	// Start a new client.
+	d.lokiClient = loki.NewClient(d.shutdownCtx, u, cert, key, caCert, instanceName, logLevel, labels, types)
+
+	// Attach the new client to the log handler.
 	d.internalListener.AddHandler("loki", d.lokiClient.HandleEvent)
 
 	return nil
@@ -775,7 +830,7 @@ func (d *Daemon) init() error {
 	var dbWarnings []dbCluster.Warning
 
 	// Set default authorizer.
-	d.authorizer, err = auth.LoadAuthorizer("tls", nil, logger.Log, nil)
+	d.authorizer, err = auth.LoadAuthorizer(d.shutdownCtx, auth.DriverTLS, logger.Log, d.identityCache)
 	if err != nil {
 		return err
 	}
@@ -961,18 +1016,6 @@ func (d *Daemon) init() error {
 		logger.Warnf(" - %s, %s", warningtype.TypeNames[warningtype.Type(w.TypeCode)], w.LastMessage)
 	}
 
-	// Detect shiftfs support.
-	if shared.IsTrue(os.Getenv("LXD_SHIFTFS_DISABLE")) {
-		logger.Info(" - shiftfs support: disabled")
-	} else {
-		if canUseShiftfs() && (util.SupportsFilesystem("shiftfs") || util.LoadModule("shiftfs") == nil) {
-			d.os.Shiftfs = true
-			logger.Info(" - shiftfs support: yes")
-		} else {
-			logger.Info(" - shiftfs support: no")
-		}
-	}
-
 	// Detect idmapped mounts support.
 	if shared.IsTrue(os.Getenv("LXD_IDMAPPED_MOUNTS_DISABLE")) {
 		logger.Info(" - idmapped mounts kernel support: disabled")
@@ -1026,18 +1069,18 @@ func (d *Daemon) init() error {
 	}
 
 	// Load cached local trusted certificates before starting listener and cluster database.
-	err = updateCertificateCacheFromLocal(d)
+	err = updateIdentityCacheFromLocal(d)
 	if err != nil {
 		return err
 	}
 
-	clustered, err := cluster.Enabled(d.db.Node)
+	d.serverClustered, err = cluster.Enabled(d.db.Node)
 	if err != nil {
 		return fmt.Errorf("Failed checking if clustered: %w", err)
 	}
 
 	// Detect if clustered, but not yet upgraded to per-server client certificates.
-	if clustered && len(d.clientCerts.Certificates[dbCluster.CertificateTypeServer]) < 1 {
+	if d.serverClustered && len(d.identityCache.GetByType(api.IdentityTypeCertificateServer)) < 1 {
 		// If the cluster has not yet upgraded to per-server client certificates (by running patch
 		// patchClusteringServerCertTrust) then temporarily use the network (cluster) certificate as client
 		// certificate, and cause us to trust it for use as client certificate from the other members.
@@ -1145,7 +1188,7 @@ func (d *Daemon) init() error {
 		store := d.gateway.NodeStore()
 
 		contextTimeout := 30 * time.Second
-		if !clustered {
+		if !d.serverClustered {
 			// FIXME: this is a workaround for #5234. We set a very
 			// high timeout when we're not clustered, since there's
 			// actually no networking involved.
@@ -1180,7 +1223,7 @@ func (d *Daemon) init() error {
 			// leader.
 			d.gateway.Cluster = d.db.Cluster
 			taskFunc, taskSchedule := cluster.HeartbeatTask(d.gateway)
-			hbGroup := task.Group{}
+			hbGroup := task.NewGroup()
 			d.taskClusterHeartbeat = hbGroup.Add(taskFunc, taskSchedule)
 			hbGroup.Start(d.shutdownCtx)
 			d.gateway.WaitUpgradeNotification()
@@ -1193,6 +1236,13 @@ func (d *Daemon) init() error {
 		}
 
 		return fmt.Errorf("Failed to initialize global database: %w", err)
+	}
+
+	// Load the embedded OpenFGA authorizer. This cannot be loaded until after the cluster database is initialised,
+	// so the TLS authorizer must be loaded first to set up clustering.
+	d.authorizer, err = auth.LoadAuthorizer(d.shutdownCtx, auth.DriverEmbeddedOpenFGA, logger.Log, d.identityCache, auth.WithOpenFGADatastore(db.NewOpenFGAStore(d.db.Cluster)))
+	if err != nil {
+		return err
 	}
 
 	d.firewall = firewall.New()
@@ -1229,9 +1279,58 @@ func (d *Daemon) init() error {
 	}
 
 	// Setup the user-agent.
-	if clustered {
+	if d.serverClustered {
 		version.UserAgentFeatures([]string{"cluster"})
 	}
+
+	// Load server name and config before patches run (so they can access them from d.State()).
+	err = d.db.Cluster.Transaction(d.shutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
+		config, err := clusterConfig.Load(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		// Get the local node (will be used if clustered).
+		serverName, err := tx.GetLocalNodeName(ctx)
+		if err != nil {
+			return err
+		}
+
+		d.globalConfigMu.Lock()
+		d.serverName = serverName
+		d.globalConfig = config
+		d.globalConfigMu.Unlock()
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	d.events.SetLocalLocation(d.serverName)
+
+	// Setup and load the server's UUID file.
+	// Use os.VarDir to allow setting up the uuid file also in the test suite.
+	var serverUUID string
+	uuidPath := filepath.Join(d.os.VarDir, "server.uuid")
+	if !shared.PathExists(uuidPath) {
+		serverUUID = uuid.New().String()
+		err := os.WriteFile(uuidPath, []byte(serverUUID), 0600)
+		if err != nil {
+			return fmt.Errorf("Failed to create server.uuid file: %w", err)
+		}
+	}
+
+	if serverUUID == "" {
+		uuidBytes, err := os.ReadFile(uuidPath)
+		if err != nil {
+			return fmt.Errorf("Failed to read server.uuid file: %w", err)
+		}
+
+		serverUUID = string(uuidBytes)
+	}
+
+	d.serverUUID = serverUUID
 
 	// Mount the storage pools.
 	logger.Infof("Initializing storage pools")
@@ -1265,30 +1364,7 @@ func (d *Daemon) init() error {
 		return err
 	}
 
-	// Get daemon configuration.
-	bgpAddress := d.localConfig.BGPAddress()
-	bgpRouterID := d.localConfig.BGPRouterID()
-	bgpASN := int64(0)
-
-	candidAPIURL := ""
-	candidAPIKey := ""
-	candidDomains := ""
-	candidExpiry := int64(0)
-
-	dnsAddress := d.localConfig.DNSAddress()
-
-	rbacAPIURL := ""
-	rbacAPIKey := ""
-	rbacAgentURL := ""
-	rbacAgentUsername := ""
-	rbacAgentPrivateKey := ""
-	rbacAgentPublicKey := ""
-	rbacExpiry := int64(0)
-
-	maasAPIURL := ""
-	maasAPIKey := ""
-	maasMachine := d.localConfig.MAASMachine()
-
+	// Load server name and config after patches run (in case its been changed).
 	err = d.db.Cluster.Transaction(d.shutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
 		config, err := clusterConfig.Load(ctx, tx)
 		if err != nil {
@@ -1312,18 +1388,29 @@ func (d *Daemon) init() error {
 		return err
 	}
 
+	d.events.SetLocalLocation(d.serverName)
+
+	// Get daemon configuration.
+	bgpAddress := d.localConfig.BGPAddress()
+	bgpRouterID := d.localConfig.BGPRouterID()
+	bgpASN := int64(0)
+
+	dnsAddress := d.localConfig.DNSAddress()
+
+	maasAPIURL := ""
+	maasAPIKey := ""
+	maasMachine := d.localConfig.MAASMachine()
+
 	// Get specific config keys.
 	d.globalConfigMu.Lock()
 	bgpASN = d.globalConfig.BGPASN()
 
 	d.proxy = shared.ProxyFromConfig(d.globalConfig.ProxyHTTPS(), d.globalConfig.ProxyHTTP(), d.globalConfig.ProxyIgnoreHosts())
 
-	candidAPIURL, candidAPIKey, candidExpiry, candidDomains = d.globalConfig.CandidServer()
 	maasAPIURL, maasAPIKey = d.globalConfig.MAASController()
-	rbacAPIURL, rbacAPIKey, rbacExpiry, rbacAgentURL, rbacAgentUsername, rbacAgentPrivateKey, rbacAgentPublicKey = d.globalConfig.RBACServer()
 	d.gateway.HeartbeatOfflineThreshold = d.globalConfig.OfflineThreshold()
-	lokiURL, lokiUsername, lokiPassword, lokiCACert, lokiLabels, lokiLoglevel, lokiTypes := d.globalConfig.LokiServer()
-	oidcIssuer, oidcClientID, oidcAudience := d.globalConfig.OIDCServer()
+	lokiURL, lokiUsername, lokiPassword, lokiCACert, lokiInstance, lokiLoglevel, lokiLabels, lokiTypes := d.globalConfig.LokiServer()
+	oidcIssuer, oidcClientID, oidcAudience, oidcGroupsClaim := d.globalConfig.OIDCServer()
 	syslogSocketEnabled := d.localConfig.SyslogSocket()
 	instancePlacementScriptlet := d.globalConfig.InstancesPlacementScriptlet()
 
@@ -1332,7 +1419,7 @@ func (d *Daemon) init() error {
 
 	// Setup Loki logger.
 	if lokiURL != "" {
-		err = d.setupLoki(lokiURL, lokiUsername, lokiPassword, lokiCACert, lokiLabels, lokiLoglevel, lokiTypes)
+		err = d.setupLoki(lokiURL, lokiUsername, lokiPassword, lokiCACert, lokiInstance, lokiLoglevel, lokiLabels, lokiTypes)
 		if err != nil {
 			return err
 		}
@@ -1345,25 +1432,16 @@ func (d *Daemon) init() error {
 		}
 	}
 
-	// Setup RBAC authentication.
-	if rbacAPIURL != "" {
-		err = d.setupRBACServer(rbacAPIURL, rbacAPIKey, rbacExpiry, rbacAgentURL, rbacAgentUsername, rbacAgentPrivateKey, rbacAgentPublicKey)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Setup Candid authentication.
-	if candidAPIURL != "" {
-		d.candidVerifier, err = candid.NewVerifier(candidAPIURL, candidAPIKey, candidExpiry, candidDomains)
-		if err != nil {
-			return err
-		}
-	}
-
 	// Setup OIDC authentication.
 	if oidcIssuer != "" && oidcClientID != "" {
-		d.oidcVerifier = oidc.NewVerifier(oidcIssuer, oidcClientID, oidcAudience)
+		httpClientFunc := func() (*http.Client, error) {
+			return util.HTTPClient("", d.proxy)
+		}
+
+		d.oidcVerifier, err = oidc.NewVerifier(oidcIssuer, oidcClientID, oidcAudience, d.serverCert, d.identityCache, httpClientFunc, &oidc.Opts{GroupsClaim: oidcGroupsClaim})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Setup BGP listener.
@@ -1504,8 +1582,8 @@ func (d *Daemon) init() error {
 			logger.Info("Started seccomp handler", logger.Ctx{"path": shared.VarPath("seccomp.socket")})
 		}
 
-		// Read the trusted certificates
-		updateCertificateCache(d)
+		// Read the trusted identities
+		updateIdentityCache(d)
 
 		// Connect to MAAS
 		if maasAPIURL != "" {
@@ -1522,7 +1600,14 @@ func (d *Daemon) init() error {
 					logger.Warn("Unable to connect to MAAS, trying again in a minute", logger.Ctx{"url": maasAPIURL, "err": err})
 
 					if !warningAdded {
-						_ = d.db.Cluster.UpsertWarningLocalNode("", -1, -1, warningtype.UnableToConnectToMAAS, err.Error())
+						_ = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+							err := tx.UpsertWarningLocalNode(ctx, "", "", -1, warningtype.UnableToConnectToMAAS, err.Error())
+							if err != nil {
+								logger.Warn("Failed to create warning", logger.Ctx{"err": err})
+							}
+
+							return nil
+						})
 
 						warningAdded = true
 					}
@@ -1538,21 +1623,27 @@ func (d *Daemon) init() error {
 		}
 	}
 
-	// Remove volatile.last_state.ready key as LXD doesn't know if the instances are ready.
-	err = d.db.Cluster.DeleteReadyStateFromLocalInstances()
+	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Remove volatile.last_state.ready key as we don't know if the instances are ready.
+		return tx.DeleteReadyStateFromLocalInstances(ctx)
+	})
 	if err != nil {
 		return fmt.Errorf("Failed deleting volatile.last_state.ready: %w", err)
 	}
 
 	close(d.setupChan)
 
-	// Create warnings that have been collected
-	for _, w := range dbWarnings {
-		err := d.db.Cluster.UpsertWarningLocalNode("", -1, -1, warningtype.Type(w.TypeCode), w.LastMessage)
-		if err != nil {
-			logger.Warn("Failed to create warning", logger.Ctx{"err": err})
+	_ = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Create warnings that have been collected
+		for _, w := range dbWarnings {
+			err := tx.UpsertWarningLocalNode(ctx, "", "", -1, warningtype.Type(w.TypeCode), w.LastMessage)
+			if err != nil {
+				logger.Warn("Failed to create warning", logger.Ctx{"err": err})
+			}
 		}
-	}
+
+		return nil
+	})
 
 	// Resolve warnings older than the daemon start time
 	err = warnings.ResolveWarningsByLocalNodeOlderThan(d.db.Cluster, d.startTime)
@@ -1561,9 +1652,11 @@ func (d *Daemon) init() error {
 	}
 
 	// Start cluster tasks if needed.
-	if clustered {
+	if d.serverClustered {
 		d.startClusterTasks()
 	}
+
+	d.tasks = *task.NewGroup()
 
 	// FIXME: There's no hard reason for which we should not run these
 	//        tasks in mock mode. However it requires that we tweak them so
@@ -1627,6 +1720,8 @@ func (d *Daemon) startClusterTasks() {
 	// Run asynchronously so that connecting to remote members doesn't delay starting up other cluster tasks.
 	go cluster.EventsUpdateListeners(d.endpoints, d.db.Cluster, d.serverCert, nil, d.events.Inject)
 
+	d.clusterTasks = *task.NewGroup()
+
 	// Heartbeats
 	d.taskClusterHeartbeat = d.clusterTasks.Add(cluster.HeartbeatTask(d.gateway))
 
@@ -1645,7 +1740,7 @@ func (d *Daemon) startClusterTasks() {
 
 func (d *Daemon) stopClusterTasks() {
 	_ = d.clusterTasks.Stop(3 * time.Second)
-	d.clusterTasks = task.Group{}
+	d.clusterTasks = *task.NewGroup()
 }
 
 // numRunningInstances returns the number of running instances.
@@ -1743,7 +1838,16 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 
 			// Unmount storage pools after instances stopped.
 			logger.Info("Stopping storage pools")
-			pools, err := s.DB.Cluster.GetStoragePoolNames()
+
+			var pools []string
+
+			err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				var err error
+
+				pools, err = tx.GetStoragePoolNames(ctx)
+
+				return err
+			})
 			if err != nil && !response.IsNotFoundError(err) {
 				logger.Error("Failed to get storage pools", logger.Ctx{"err": err})
 			}
@@ -1831,81 +1935,6 @@ func (d *Daemon) Stop(ctx context.Context, sig os.Signal) error {
 	}
 
 	return err
-}
-
-// Setup RBAC.
-func (d *Daemon) setupRBACServer(rbacURL string, rbacKey string, rbacExpiry int64, rbacAgentURL string, rbacAgentUsername string, rbacAgentPrivateKey string, rbacAgentPublicKey string) error {
-	var err error
-
-	if d.authorizer != nil {
-		d.authorizer.StopStatusCheck()
-	}
-
-	if rbacURL == "" || rbacAgentURL == "" || rbacAgentUsername == "" || rbacAgentPrivateKey == "" || rbacAgentPublicKey == "" {
-		d.candidVerifier = nil
-
-		// Reset to default authorizer.
-		d.authorizer, err = auth.LoadAuthorizer("tls", nil, logger.Log, nil)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}
-
-	revert := revert.New()
-	defer revert.Fail()
-
-	projectsFunc := func() (map[int64]string, error) {
-		var result map[int64]string
-		err := d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			var err error
-			result, err = dbCluster.GetProjectIDsToNames(ctx, tx.Tx())
-			return err
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		return result, nil
-	}
-
-	config := map[string]any{
-		"rbac.api.url":           rbacURL,
-		"rbac.agent.url":         rbacAgentURL,
-		"rbac.agent.private_key": rbacAgentPrivateKey,
-		"rbac.agent.public_key":  rbacAgentPublicKey,
-		"rbac.agent.username":    rbacAgentUsername,
-	}
-
-	revert.Add(func() {
-		d.candidVerifier = nil
-
-		// Reset to default authorizer.
-		d.authorizer, _ = auth.LoadAuthorizer("tls", nil, logger.Log, nil)
-	})
-
-	// Load RBAC authorizer
-	rbacAuthorizer, err := auth.LoadAuthorizer("rbac", config, logger.Log, projectsFunc)
-	if err != nil {
-		return err
-	}
-
-	revert.Add(func() {
-		// Stop status check in case candid fails.
-		rbacAuthorizer.StopStatusCheck()
-	})
-
-	// Enable candid authentication
-	d.candidVerifier, err = candid.NewVerifier(fmt.Sprintf("%s/auth", rbacURL), rbacKey, rbacExpiry, "")
-	if err != nil {
-		return err
-	}
-
-	d.authorizer = rbacAuthorizer
-
-	revert.Success()
-	return nil
 }
 
 // Setup MAAS.
@@ -2027,7 +2056,9 @@ func (d *Daemon) heartbeatHandler(w http.ResponseWriter, r *http.Request, isLead
 			logger.Warn("Time skew detected between leader and local", logger.Ctx{"leaderTime": hbData.Time, "localTime": now})
 
 			if d.db.Cluster != nil {
-				err := d.db.Cluster.UpsertWarningLocalNode("", -1, -1, warningtype.ClusterTimeSkew, fmt.Sprintf("leaderTime: %s, localTime: %s", hbData.Time, now))
+				err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+					return tx.UpsertWarningLocalNode(ctx, "", "", -1, warningtype.ClusterTimeSkew, fmt.Sprintf("leaderTime: %s, localTime: %s", hbData.Time, now))
+				})
 				if err != nil {
 					logger.Warn("Failed to create cluster time skew warning", logger.Ctx{"err": err})
 				}
@@ -2150,8 +2181,8 @@ func (d *Daemon) nodeRefreshTask(heartbeatData *cluster.APIHeartbeat, isLeader b
 	if d.hasMemberStateChanged(heartbeatData) {
 		logger.Info("Cluster member state has changed", logger.Ctx{"local": localClusterAddress})
 
-		// Refresh cluster certificates cached.
-		updateCertificateCache(d)
+		// Refresh the identity cache.
+		updateIdentityCache(d)
 
 		// Refresh forkdns peers.
 		err := networkUpdateForkdnsServersTask(s, heartbeatData)

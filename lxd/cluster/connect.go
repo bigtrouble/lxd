@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -66,6 +67,17 @@ func Connect(address string, networkCert *shared.CertInfo, serverCert *shared.Ce
 
 			req.Header.Add(request.HeaderForwardedAddress, r.RemoteAddr)
 
+			identityProviderGroupsAny := ctx.Value(request.CtxIdentityProviderGroups)
+			if ok {
+				identityProviderGroups, ok := identityProviderGroupsAny.([]string)
+				if ok {
+					b, err := json.Marshal(identityProviderGroups)
+					if err == nil {
+						req.Header.Add(request.HeaderForwardedIdentityProviderGroups, string(b))
+					}
+				}
+			}
+
 			return shared.ProxyFromEnvironment(req)
 		}
 
@@ -79,9 +91,14 @@ func Connect(address string, networkCert *shared.CertInfo, serverCert *shared.Ce
 // ConnectIfInstanceIsRemote figures out the address of the cluster member which is running the instance with the
 // given name in the specified project. If it's not the local member will connect to it and return the connected
 // client (configured with the specified project), otherwise it will just return nil.
-func ConnectIfInstanceIsRemote(cluster *db.Cluster, projectName string, instName string, networkCert *shared.CertInfo, serverCert *shared.CertInfo, r *http.Request, instanceType instancetype.Type) (lxd.InstanceServer, error) {
+func ConnectIfInstanceIsRemote(s *state.State, projectName string, instName string, r *http.Request, instanceType instancetype.Type) (lxd.InstanceServer, error) {
+	// No need to connect if not clustered.
+	if !s.ServerClustered {
+		return nil, nil
+	}
+
 	var address string // Cluster member address.
-	err := cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		var err error
 		address, err = tx.GetNodeAddressOfInstance(ctx, projectName, instName, instanceType)
 		return err
@@ -94,7 +111,7 @@ func ConnectIfInstanceIsRemote(cluster *db.Cluster, projectName string, instName
 		return nil, nil // The instance is running on this local member, no need to connect.
 	}
 
-	client, err := Connect(address, networkCert, serverCert, r, false)
+	client, err := Connect(address, s.Endpoints.NetworkCert(), s.ServerCert(), r, false)
 	if err != nil {
 		return nil, err
 	}
@@ -148,22 +165,22 @@ func ConnectIfVolumeIsRemote(s *state.State, poolName string, projectName string
 			return nil, fmt.Errorf("Failed checking if volume %q is available: %w", volumeName, err)
 		}
 
-		if remoteInstance != nil {
-			var instNode db.NodeInfo
-			err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-				instNode, err = tx.GetNodeByName(ctx, remoteInstance.Node)
-				return err
-			})
-			if err != nil {
-				return nil, fmt.Errorf("Failed getting cluster member info for %q: %w", remoteInstance.Node, err)
-			}
-
-			// Replace node list with instance's cluster member node (which might be local member).
-			nodes = []db.NodeInfo{instNode}
-		} else {
+		if remoteInstance == nil {
 			// Volume isn't exclusively attached to an instance. Use local cluster member.
 			return nil, nil
 		}
+
+		var instNode db.NodeInfo
+		err = s.DB.Cluster.Transaction(s.ShutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
+			instNode, err = tx.GetNodeByName(ctx, remoteInstance.Node)
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("Failed getting cluster member info for %q: %w", remoteInstance.Node, err)
+		}
+
+		// Replace node list with instance's cluster member node (which might be local member).
+		nodes = []db.NodeInfo{instNode}
 	}
 
 	nodeCount := len(nodes)
@@ -206,8 +223,12 @@ func SetupTrust(serverCert *shared.CertInfo, serverName string, targetAddress st
 	}
 
 	post := api.CertificatesPost{
-		CertificatePut: cert.CertificatePut,
-		Password:       targetPassword,
+		Name:        cert.Name,
+		Type:        cert.Type,
+		Projects:    cert.Projects,
+		Restricted:  cert.Restricted,
+		Certificate: cert.Certificate,
+		Password:    targetPassword,
 	}
 
 	err = target.CreateCertificate(post)
@@ -255,7 +276,7 @@ func UpdateTrust(serverCert *shared.CertInfo, serverName string, targetAddress s
 		// Ensure that if a client certificate already exists that matches our fingerprint, that it
 		// has the correct name and type for cluster operation, to allow us to associate member
 		// server names to certificate names.
-		err = target.UpdateCertificate(cert.Fingerprint, cert.CertificatePut, "")
+		err = target.UpdateCertificate(cert.Fingerprint, cert.Writable(), "")
 		if err != nil {
 			return fmt.Errorf("Failed updating certificate name and type in trust store: %w", err)
 		}

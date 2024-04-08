@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
 	petname "github.com/dustinkirkland/golang-petname"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/canonical/lxd/lxd/archive"
@@ -26,7 +28,6 @@ import (
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/scriptlet"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
@@ -35,6 +36,7 @@ import (
 	apiScriptlet "github.com/canonical/lxd/shared/api/scriptlet"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/version"
 )
 
@@ -49,7 +51,7 @@ func ensureDownloadedImageFitWithinBudget(s *state.State, r *http.Request, op *o
 
 	var budget int64
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		budget, err = project.GetImageSpaceBudget(tx, p.Name)
+		budget, err = project.GetImageSpaceBudget(s.GlobalConfig, tx, p.Name)
 		return err
 	})
 	if err != nil {
@@ -284,16 +286,16 @@ func createFromMigration(s *state.State, r *http.Request, projectName string, pr
 	if req.Source.Refresh || (clusterMoveSourceName != "" && clusterMoveSourceName == req.Name) {
 		inst, err = instance.LoadByProjectAndName(s, projectName, req.Name)
 		if err != nil {
-			if response.IsNotFoundError(err) {
-				if clusterMoveSourceName != "" {
-					// Cluster move doesn't allow renaming as part of migration so fail here.
-					return response.SmartError(fmt.Errorf("Cluster move doesn't allow renaming"))
-				}
-
-				req.Source.Refresh = false
-			} else {
+			if !response.IsNotFoundError(err) {
 				return response.SmartError(err)
 			}
+
+			if clusterMoveSourceName != "" {
+				// Cluster move doesn't allow renaming as part of migration so fail here.
+				return response.SmartError(fmt.Errorf("Cluster move doesn't allow renaming"))
+			}
+
+			req.Source.Refresh = false
 		}
 	}
 
@@ -423,19 +425,13 @@ func createFromCopy(s *state.State, r *http.Request, projectName string, profile
 		return response.SmartError(err)
 	}
 
-	// Check if we need to redirect to migration
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.SmartError(err)
-	}
-
 	// When clustered, use the node name, otherwise use the hostname.
-	if clustered {
+	if s.ServerClustered {
 		serverName := s.ServerName
 
 		if serverName != source.Location() {
 			// Check if we are copying from a ceph-based container.
-			_, rootDevice, _ := shared.GetRootDiskDevice(source.ExpandedDevices().CloneNative())
+			_, rootDevice, _ := instancetype.GetRootDiskDevice(source.ExpandedDevices().CloneNative())
 			sourcePoolName := rootDevice["pool"]
 
 			destPoolName, _, _, _, resp := instanceFindStoragePool(s, targetProject, req)
@@ -448,7 +444,13 @@ func createFromCopy(s *state.State, r *http.Request, projectName string, profile
 				return clusterCopyContainerInternal(s, r, source, projectName, profiles, req)
 			}
 
-			_, pool, _, err := s.DB.Cluster.GetStoragePoolInAnyState(sourcePoolName)
+			var pool *api.StoragePool
+
+			err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				_, pool, _, err = tx.GetStoragePoolInAnyState(ctx, sourcePoolName)
+
+				return err
+			})
 			if err != nil {
 				err = fmt.Errorf("Failed to fetch instance's pool info: %w", err)
 				return response.SmartError(err)
@@ -468,7 +470,7 @@ func createFromCopy(s *state.State, r *http.Request, projectName string, profile
 	}
 
 	for key, value := range sourceConfig {
-		if !shared.InstanceIncludeWhenCopying(key, false) {
+		if !instancetype.InstanceIncludeWhenCopying(key, false) {
 			logger.Debug("Skipping key from copy source", logger.Ctx{"key": key, "sourceProject": source.Project().Name, "sourceInstance": source.Name(), "project": targetProject, "instance": req.Name})
 			continue
 		}
@@ -563,7 +565,7 @@ func createFromCopy(s *state.State, r *http.Request, projectName string, profile
 	return operations.OperationResponse(op)
 }
 
-func createFromBackup(s *state.State, r *http.Request, projectName string, data io.Reader, pool string, instanceName string) response.Response {
+func createFromBackup(s *state.State, r *http.Request, projectName string, data io.Reader, pool string, instanceName string, devices map[string]map[string]string) response.Response {
 	revert := revert.New()
 	defer revert.Fail()
 
@@ -634,13 +636,13 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 	// Check project permissions.
 	err = s.DB.Cluster.Transaction(s.ShutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
 		req := api.InstancesPost{
-			InstancePut: bInfo.Config.Container.InstancePut,
+			InstancePut: bInfo.Config.Container.Writable(),
 			Name:        bInfo.Name,
 			Source:      api.InstanceSource{}, // Only relevant for "copy" or "migration", but may not be nil.
 			Type:        api.InstanceType(bInfo.Config.Container.Type),
 		}
 
-		return project.AllowInstanceCreation(tx, projectName, req)
+		return project.AllowInstanceCreation(s.GlobalConfig, tx, projectName, req)
 	})
 	if err != nil {
 		return response.SmartError(err)
@@ -658,6 +660,18 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 		bInfo.Name = instanceName
 	}
 
+	// Override the volume's UUID.
+	// Normally a volume (and its snapshots) gets a new UUID if their config doesn't already have
+	// a `volatile.uuid` field during creation of the volume's record in the DB.
+	// When importing a backup we have to ensure to not pass the backup volume's UUID when
+	// calling the actual backend functions for the target volume that perform some preliminary validation checks.
+	bInfo.Config.Volume.Config["volatile.uuid"] = uuid.New().String()
+
+	// Override the volume snapshot's UUID.
+	for _, snapshot := range bInfo.Config.VolumeSnapshots {
+		snapshot.Config["volatile.uuid"] = uuid.New().String()
+	}
+
 	logger.Debug("Backup file info loaded", logger.Ctx{
 		"type":      bInfo.Type,
 		"name":      bInfo.Name,
@@ -668,8 +682,12 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 		"snapshots": bInfo.Snapshots,
 	})
 
-	// Check storage pool exists.
-	_, _, _, err = s.DB.Cluster.GetStoragePoolInAnyState(bInfo.Pool)
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check storage pool exists.
+		_, _, _, err = tx.GetStoragePoolInAnyState(ctx, bInfo.Pool)
+
+		return err
+	})
 	if response.IsNotFoundError(err) {
 		// The storage pool doesn't exist. If backup is in binary format (so we cannot alter
 		// the backup.yaml) or the pool has been specified directly from the user restoring
@@ -678,13 +696,19 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 			return response.InternalError(fmt.Errorf("Storage pool not found: %w", err))
 		}
 
-		// Otherwise try and restore to the project's default profile pool.
-		_, profile, err := s.DB.Cluster.GetProfile(bInfo.Project, "default")
+		var profile *api.Profile
+
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Otherwise try and restore to the project's default profile pool.
+			_, profile, err = tx.GetProfile(ctx, bInfo.Project, "default")
+
+			return err
+		})
 		if err != nil {
 			return response.InternalError(fmt.Errorf("Failed to get default profile: %w", err))
 		}
 
-		_, v, err := shared.GetRootDiskDevice(profile.Devices)
+		_, v, err := instancetype.GetRootDiskDevice(profile.Devices)
 		if err != nil {
 			return response.InternalError(fmt.Errorf("Failed to get root disk device: %w", err))
 		}
@@ -724,14 +748,14 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 
 		runRevert.Add(revertHook)
 
-		err = internalImportFromBackup(s, bInfo.Project, bInfo.Name, instanceName != "")
+		err = internalImportFromBackup(s, bInfo.Project, bInfo.Name, instanceName != "", devices)
 		if err != nil {
 			return fmt.Errorf("Failed importing backup: %w", err)
 		}
 
 		inst, err := instance.LoadByProjectAndName(s, bInfo.Project, bInfo.Name)
 		if err != nil {
-			return fmt.Errorf("Load instance: %w", err)
+			return fmt.Errorf("Failed loading instance: %w", err)
 		}
 
 		// Clean up created instance if the post hook fails below.
@@ -809,14 +833,36 @@ func createFromBackup(s *state.State, r *http.Request, projectName string, data 
 func instancesPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	targetProjectName := projectParam(r)
+	targetProjectName := request.ProjectParam(r)
 	clusterNotification := isClusterNotification(r)
 
 	logger.Debug("Responding to instance create")
 
 	// If we're getting binary content, process separately
 	if r.Header.Get("Content-Type") == "application/octet-stream" {
-		return createFromBackup(s, r, targetProjectName, r.Body, r.Header.Get("X-LXD-pool"), r.Header.Get("X-LXD-name"))
+		deviceMap := map[string]map[string]string{}
+
+		if r.Header.Get("X-LXD-devices") != "" {
+			devProps, err := url.ParseQuery(r.Header.Get("X-LXD-devices"))
+			if err != nil {
+				return response.BadRequest(err)
+			}
+
+			for devKey := range devProps {
+				deviceMap[devKey] = map[string]string{}
+
+				props, err := url.ParseQuery(devProps.Get(devKey))
+				if err != nil {
+					return response.BadRequest(err)
+				}
+
+				for k := range props {
+					deviceMap[devKey][k] = props.Get(k)
+				}
+			}
+		}
+
+		return createFromBackup(s, r, targetProjectName, r.Body, r.Header.Get("X-LXD-pool"), r.Header.Get("X-LXD-name"), deviceMap)
 	}
 
 	// Parse the request
@@ -861,12 +907,6 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		}
 	}
 
-	// Check if clustered.
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.InternalError(fmt.Errorf("Failed to check for cluster state: %w", err))
-	}
-
 	var targetProject *api.Project
 	var profiles []api.Profile
 	var sourceInst *dbCluster.Instance
@@ -876,8 +916,8 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	var targetMemberInfo *db.NodeInfo
 
 	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
-		target := queryParam(r, "target")
-		if !clustered && target != "" {
+		target := request.QueryParam(r, "target")
+		if !s.ServerClustered && target != "" {
 			return api.StatusErrorf(http.StatusBadRequest, "Target only allowed when clustered")
 		}
 
@@ -894,7 +934,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		var targetGroupName string
 		var allMembers []db.NodeInfo
 
-		if clustered && !clusterNotification {
+		if s.ServerClustered && !clusterNotification {
 			allMembers, err = tx.GetNodes(ctx)
 			if err != nil {
 				return fmt.Errorf("Failed getting cluster members: %w", err)
@@ -1023,7 +1063,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			logger.Debug("No name provided for new instance, using auto-generated name", logger.Ctx{"project": targetProjectName, "instance": req.Name})
 		}
 
-		if clustered && !clusterNotification && targetMemberInfo == nil {
+		if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
 			architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProjectName, sourceInst, sourceImageRef, req)
 			if err != nil {
 				return err
@@ -1062,7 +1102,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		if !clusterNotification {
 			// Check that the project's limits are not violated. Note this check is performed after
 			// automatically generated config values (such as ones from an InstanceType) have been set.
-			err = project.AllowInstanceCreation(tx, targetProjectName, req)
+			err = project.AllowInstanceCreation(s.GlobalConfig, tx, targetProjectName, req)
 			if err != nil {
 				return err
 			}
@@ -1079,7 +1119,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	if clustered && !clusterNotification && targetMemberInfo == nil {
+	if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
 		// Run instance placement scriptlet if enabled and no cluster member selected yet.
 		if s.GlobalConfig.InstancesPlacementScriptlet() != "" {
 			leaderAddress, err := d.gateway.LeaderAddress()
@@ -1094,8 +1134,13 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 				Reason:        apiScriptlet.InstancePlacementReasonNew,
 			}
 
-			reqExpanded.Config = db.ExpandInstanceConfig(reqExpanded.Config, profiles)
-			reqExpanded.Devices = db.ExpandInstanceDevices(deviceConfig.NewDevices(reqExpanded.Devices), profiles).CloneNative()
+			var globalConfigDump map[string]any
+			if s.GlobalConfig != nil {
+				globalConfigDump = s.GlobalConfig.Dump()
+			}
+
+			reqExpanded.Config = instancetype.ExpandInstanceConfig(globalConfigDump, reqExpanded.Config, profiles)
+			reqExpanded.Devices = instancetype.ExpandInstanceDevices(deviceConfig.NewDevices(reqExpanded.Devices), profiles).CloneNative()
 
 			targetMemberInfo, err = scriptlet.InstancePlacementRun(r.Context(), logger.Log, s, &reqExpanded, candidateMembers, leaderAddress)
 			if err != nil {
@@ -1148,19 +1193,20 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	}
 }
 
-func instanceFindStoragePool(s *state.State, projectName string, req *api.InstancesPost) (string, string, string, map[string]string, response.Response) {
+func instanceFindStoragePool(s *state.State, projectName string, req *api.InstancesPost) (storagePool string, storagePoolProfile string, localRootDiskDeviceKey string, localRootDiskDevice map[string]string, resp response.Response) {
 	// Grab the container's root device if one is specified
-	storagePool := ""
-	storagePoolProfile := ""
-
-	localRootDiskDeviceKey, localRootDiskDevice, _ := shared.GetRootDiskDevice(req.Devices)
+	localRootDiskDeviceKey, localRootDiskDevice, _ = instancetype.GetRootDiskDevice(req.Devices)
 	if localRootDiskDeviceKey != "" {
 		storagePool = localRootDiskDevice["pool"]
 	}
 
 	// Handle copying/moving between two storage-api LXD instances.
 	if storagePool != "" {
-		_, err := s.DB.Cluster.GetStoragePoolID(storagePool)
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			_, err := tx.GetStoragePoolID(ctx, storagePool)
+
+			return err
+		})
 		if response.IsNotFoundError(err) {
 			storagePool = ""
 			// Unset the local root disk device storage pool if not
@@ -1171,25 +1217,41 @@ func instanceFindStoragePool(s *state.State, projectName string, req *api.Instan
 
 	// If we don't have a valid pool yet, look through profiles
 	if storagePool == "" {
-		for _, pName := range req.Profiles {
-			_, p, err := s.DB.Cluster.GetProfile(projectName, pName)
-			if err != nil {
-				return "", "", "", nil, response.SmartError(err)
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			for _, pName := range req.Profiles {
+				_, p, err := tx.GetProfile(ctx, projectName, pName)
+				if err != nil {
+					return err
+				}
+
+				k, v, _ := instancetype.GetRootDiskDevice(p.Devices)
+				if k != "" && v["pool"] != "" {
+					// Keep going as we want the last one in the profile chain
+					storagePool = v["pool"]
+					storagePoolProfile = pName
+				}
 			}
 
-			k, v, _ := shared.GetRootDiskDevice(p.Devices)
-			if k != "" && v["pool"] != "" {
-				// Keep going as we want the last one in the profile chain
-				storagePool = v["pool"]
-				storagePoolProfile = pName
-			}
+			return nil
+		})
+		if err != nil {
+			return "", "", "", nil, response.SmartError(err)
 		}
 	}
 
 	// If there is just a single pool in the database, use that
 	if storagePool == "" {
 		logger.Debug("No valid storage pool in the container's local root disk device and profiles found")
-		pools, err := s.DB.Cluster.GetStoragePoolNames()
+
+		var pools []string
+
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var err error
+
+			pools, err = tx.GetStoragePoolNames(ctx)
+
+			return err
+		})
 		if err != nil {
 			if response.IsNotFoundError(err) {
 				return "", "", "", nil, response.BadRequest(fmt.Errorf("This LXD instance does not have any storage pools configured"))
@@ -1275,7 +1337,12 @@ func clusterCopyContainerInternal(s *state.State, r *http.Request, source instan
 
 	websockets := map[string]string{}
 	for k, v := range opAPI.Metadata {
-		websockets[k] = v.(string)
+		ws, ok := v.(string)
+		if !ok {
+			continue
+		}
+
+		websockets[k] = ws
 	}
 
 	// Reset the source for a migration

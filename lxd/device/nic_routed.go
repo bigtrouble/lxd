@@ -13,10 +13,10 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/ip"
 	"github.com/canonical/lxd/lxd/network"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/validate"
 )
 
@@ -85,7 +85,19 @@ func (d *nicRouted) validateConfig(instConf instance.ConfigReader) error {
 	rules["ipv4.address"] = validate.Optional(validate.IsListOf(validate.IsNetworkAddressV4))
 	rules["ipv6.address"] = validate.Optional(validate.IsListOf(validate.IsNetworkAddressV6))
 	rules["gvrp"] = validate.Optional(validate.IsBool)
+	// lxdmeta:generate(entities=device-nic-routed; group=device-conf; key=ipv4.neighbor_probe)
+	//
+	// ---
+	//  type: bool
+	//  defaultdesc: `true`
+	//  shortdesc: Whether to probe the parent network for IPv4 address availability
 	rules["ipv4.neighbor_probe"] = validate.Optional(validate.IsBool)
+	// lxdmeta:generate(entities=device-nic-routed; group=device-conf; key=ipv6.neighbor_probe)
+	//
+	// ---
+	//  type: bool
+	//  defaultdesc: `true`
+	//  shortdesc: Whether to probe the parent network for IPv6 address availability
 	rules["ipv6.neighbor_probe"] = validate.Optional(validate.IsBool)
 
 	err = d.config.Validate(rules)

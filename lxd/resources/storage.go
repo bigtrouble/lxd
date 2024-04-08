@@ -2,8 +2,10 @@ package resources
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 )
 
@@ -18,6 +21,7 @@ var devDiskByPath = "/dev/disk/by-path"
 var devDiskByID = "/dev/disk/by-id"
 var runUdevData = "/run/udev/data"
 var sysClassBlock = "/sys/class/block"
+var procSelfMountInfo = "/proc/self/mountinfo"
 
 func storageAddDriveInfo(devicePath string, disk *api.ResourcesStorageDisk) error {
 	// Attempt to open the device path
@@ -83,9 +87,20 @@ func storageAddDriveInfo(devicePath string, disk *api.ResourcesStorageDisk) erro
 		}
 
 		// Serial number
-		if udevProperties["E:ID_SERIAL_SHORT"] != "" {
-			disk.Serial = udevProperties["E:ID_SERIAL_SHORT"]
+		serial := udevProperties["E:SCSI_IDENT_SERIAL"]
+		if serial == "" {
+			serial = udevProperties["E:ID_SCSI_SERIAL"]
 		}
+
+		if serial == "" {
+			serial = udevProperties["E:ID_SERIAL_SHORT"]
+		}
+
+		if serial == "" {
+			serial = udevProperties["E:ID_SERIAL"]
+		}
+
+		disk.Serial = serial
 
 		// Model number (attempt to get original string from encoded value)
 		if udevProperties["E:ID_MODEL_ENC"] != "" {
@@ -124,6 +139,25 @@ func GetStorage() (*api.ResourcesStorage, error) {
 		entries, err := os.ReadDir(sysClassBlock)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to list %q: %w", sysClassBlock, err)
+		}
+
+		// Get information about what's mounted.
+		mountInfo, err := os.ReadFile(procSelfMountInfo)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to read %q: %w", procSelfMountInfo, err)
+		}
+
+		mountedIDs := map[string]bool{}
+		scanner := bufio.NewScanner(bytes.NewReader(mountInfo))
+		for scanner.Scan() {
+			line := scanner.Text()
+			fields := strings.Fields(line)
+
+			if len(fields) < 3 {
+				return nil, fmt.Errorf("Invalid %q content: %q", procSelfMountInfo, line)
+			}
+
+			mountedIDs[fields[2]] = true
 		}
 
 		// Iterate and add to our list
@@ -265,6 +299,9 @@ func GetStorage() (*api.ResourcesStorage, error) {
 				}
 			}
 
+			// Set the mounted status of the disk.
+			disk.Mounted = mountedIDs[disk.Device]
+
 			// Look for partitions
 			disk.Partitions = []api.ResourcesStorageDiskPartition{}
 			for _, subEntry := range entries {
@@ -298,6 +335,14 @@ func GetStorage() (*api.ResourcesStorage, error) {
 				}
 
 				partition.Device = strings.TrimSpace(string(partitionDev))
+
+				// Set the mounted status of the partition.
+				partition.Mounted = mountedIDs[partition.Device]
+
+				// If the disk has a mounted partition, consider the disk mounted as well.
+				if partition.Mounted {
+					disk.Mounted = true
+				}
 
 				// Read-only
 				partitionRo, err := readUint(filepath.Join(subEntryPath, "ro"))
@@ -393,4 +438,24 @@ func GetStorage() (*api.ResourcesStorage, error) {
 	}
 
 	return &storage, nil
+}
+
+// GetDisksByID returns all disks whose ID contains the filter prefix.
+func GetDisksByID(filterPrefix string) ([]string, error) {
+	disks, err := os.ReadDir(devDiskByID)
+	if err != nil {
+		return nil, fmt.Errorf("Failed getting disks by ID: %w", err)
+	}
+
+	var filteredDisks []string
+	for _, disk := range disks {
+		// Skip the disk if it does not have the prefix.
+		if !shared.StringHasPrefix(disk.Name(), filterPrefix) {
+			continue
+		}
+
+		filteredDisks = append(filteredDisks, path.Join(devDiskByID, disk.Name()))
+	}
+
+	return filteredDisks, nil
 }

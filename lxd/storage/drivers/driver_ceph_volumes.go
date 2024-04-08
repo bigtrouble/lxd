@@ -11,20 +11,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 
 	"github.com/canonical/lxd/lxd/backup"
+	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/instancewriter"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/validate"
 )
@@ -94,7 +94,7 @@ func (d *ceph) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Ope
 			// be restored in the future and a new cached image volume will be created instead.
 			if volSizeBytes != poolVolSizeBytes {
 				d.logger.Debug("Renaming deleted cached image volume so that regeneration is used", logger.Ctx{"fingerprint": vol.Name()})
-				randomVol := NewVolume(d, d.name, deletedVol.volType, deletedVol.contentType, strings.Replace(uuid.New(), "-", "", -1), deletedVol.config, deletedVol.poolConfig)
+				randomVol := NewVolume(d, d.name, deletedVol.volType, deletedVol.contentType, strings.Replace(uuid.New().String(), "-", "", -1), deletedVol.config, deletedVol.poolConfig)
 				err = renameVolume(d.getRBDVolumeName(deletedVol, "", false, true), d.getRBDVolumeName(randomVol, "", false, true))
 				if err != nil {
 					return err
@@ -314,12 +314,12 @@ func (d *ceph) getVolumeSize(volumeName string) (int64, error) {
 }
 
 // CreateVolumeFromBackup re-creates a volume from its exported state.
-func (d *ceph) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
+func (d *ceph) CreateVolumeFromBackup(vol VolumeCopy, srcBackup backup.Info, srcData io.ReadSeeker, op *operations.Operation) (VolumePostHook, revert.Hook, error) {
 	return genericVFSBackupUnpack(d, d.state.OS, vol, srcBackup.Snapshots, srcData, op)
 }
 
 // CreateVolumeFromCopy provides same-pool volume copying functionality.
-func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, allowInconsistent bool, op *operations.Operation) error {
+func (d *ceph) CreateVolumeFromCopy(vol VolumeCopy, srcVol VolumeCopy, allowInconsistent bool, op *operations.Operation) error {
 	var err error
 	revert := revert.New()
 	defer revert.Fail()
@@ -354,7 +354,7 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 
 		// Resize volume to the size specified. Only uses volume "size" property and does not use
 		// pool/defaults to give the caller more control over the size being used.
-		err = d.SetVolumeQuota(vol, vol.config["size"], false, op)
+		err = d.SetVolumeQuota(vol.Volume, vol.config["size"], false, op)
 		if err != nil {
 			return err
 		}
@@ -362,17 +362,31 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 		return nil
 	}
 
+	// For VMs, also copy the filesystem volume.
+	if vol.IsVMBlock() {
+		// We can pass the regular volume's snapshots as only their presence is relevant.
+		srcFSVol := NewVolumeCopy(srcVol.NewVMBlockFilesystemVolume(), srcVol.Snapshots...)
+		fsVol := NewVolumeCopy(vol.NewVMBlockFilesystemVolume(), vol.Snapshots...)
+		err := d.CreateVolumeFromCopy(fsVol, srcFSVol, false, op)
+		if err != nil {
+			return err
+		}
+
+		// Delete on revert.
+		revert.Add(func() { _ = d.DeleteVolume(fsVol.Volume, op) })
+	}
+
 	// Retrieve snapshots on the source.
 	snapshots := []string{}
-	if !srcVol.IsSnapshot() && copySnapshots {
-		snapshots, err = d.VolumeSnapshots(srcVol, op)
+	if !srcVol.IsSnapshot() && len(vol.Snapshots) > 0 {
+		snapshots, err = d.VolumeSnapshots(srcVol.Volume, op)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Copy without snapshots.
-	if !copySnapshots || len(snapshots) == 0 {
+	if len(vol.Snapshots) == 0 || len(snapshots) == 0 {
 		// If lightweight clone mode isn't enabled, perform a full copy of the volume.
 		if shared.IsFalse(d.config["ceph.rbd.clone_copy"]) {
 			_, err = shared.RunCommand(
@@ -380,68 +394,58 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 				"--id", d.config["ceph.user.name"],
 				"--cluster", d.config["ceph.cluster_name"],
 				"cp",
-				d.getRBDVolumeName(srcVol, "", false, true),
-				d.getRBDVolumeName(vol, "", false, true),
+				d.getRBDVolumeName(srcVol.Volume, "", false, true),
+				d.getRBDVolumeName(vol.Volume, "", false, true),
 			)
 			if err != nil {
 				return err
 			}
 
-			revert.Add(func() { _ = d.DeleteVolume(vol, op) })
+			revert.Add(func() { _ = d.DeleteVolume(vol.Volume, op) })
 
-			_, err = d.rbdMapVolume(vol)
+			_, err = d.rbdMapVolume(vol.Volume)
 			if err != nil {
 				return err
 			}
 
-			revert.Add(func() { _ = d.rbdUnmapVolume(vol, true) })
+			revert.Add(func() { _ = d.rbdUnmapVolume(vol.Volume, true) })
 		} else {
 			parentVol := srcVol
 			snapshotName := "readonly"
 
 			if srcVol.volType != VolumeTypeImage {
-				snapshotName = fmt.Sprintf("zombie_snapshot_%s", uuid.New())
+				snapshotName = fmt.Sprintf("zombie_snapshot_%s", uuid.New().String())
 
 				if srcVol.IsSnapshot() {
 					srcParentName, srcSnapOnlyName, _ := api.GetParentAndSnapshotName(srcVol.name)
 					snapshotName = fmt.Sprintf("snapshot_%s", srcSnapOnlyName)
-					parentVol = NewVolume(d, d.name, srcVol.volType, srcVol.contentType, srcParentName, nil, nil)
+					parentVol = NewVolumeCopy(NewVolume(d, d.name, srcVol.volType, srcVol.contentType, srcParentName, nil, nil))
 				} else {
 					// Create snapshot.
-					err := d.rbdCreateVolumeSnapshot(srcVol, snapshotName)
+					err := d.rbdCreateVolumeSnapshot(srcVol.Volume, snapshotName)
 					if err != nil {
 						return err
 					}
 				}
 
 				// Protect volume so we can create clones of it.
-				err = d.rbdProtectVolumeSnapshot(parentVol, snapshotName)
+				err = d.rbdProtectVolumeSnapshot(parentVol.Volume, snapshotName)
 				if err != nil {
 					return err
 				}
 
-				revert.Add(func() { _ = d.rbdUnprotectVolumeSnapshot(parentVol, snapshotName) })
+				revert.Add(func() { _ = d.rbdUnprotectVolumeSnapshot(parentVol.Volume, snapshotName) })
 			}
 
-			err = d.rbdCreateClone(parentVol, snapshotName, vol)
+			err = d.rbdCreateClone(parentVol.Volume, snapshotName, vol.Volume)
 			if err != nil {
 				return err
 			}
 
-			revert.Add(func() { _ = d.DeleteVolume(vol, op) })
+			revert.Add(func() { _ = d.DeleteVolume(vol.Volume, op) })
 		}
 
-		// For VMs, also copy the filesystem volume.
-		if vol.IsVMBlock() {
-			srcFSVol := srcVol.NewVMBlockFilesystemVolume()
-			fsVol := vol.NewVMBlockFilesystemVolume()
-			err := d.CreateVolumeFromCopy(fsVol, srcFSVol, false, false, op)
-			if err != nil {
-				return err
-			}
-		}
-
-		err = postCreateTasks(vol)
+		err = postCreateTasks(vol.Volume)
 		if err != nil {
 			return err
 		}
@@ -453,15 +457,15 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 	// Copy with snapshots.
 
 	// Create empty placeholder volume
-	err = d.rbdCreateVolume(vol, "0")
+	err = d.rbdCreateVolume(vol.Volume, "0")
 	if err != nil {
 		return err
 	}
 
-	revert.Add(func() { _ = d.rbdDeleteVolume(vol) })
+	revert.Add(func() { _ = d.rbdDeleteVolume(vol.Volume) })
 
 	// Receive over the placeholder volume we created above.
-	targetVolumeName := d.getRBDVolumeName(vol, "", false, true)
+	targetVolumeName := d.getRBDVolumeName(vol.Volume, "", false, true)
 
 	lastSnap := ""
 
@@ -479,13 +483,13 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 		}
 
 		lastSnap = fmt.Sprintf("snapshot_%s", snap)
-		sourceVolumeName := d.getRBDVolumeName(srcVol, lastSnap, false, true)
-		err = d.copyWithSnapshots(sourceVolumeName, targetVolumeName, prev)
+		sourceVolumeName := d.getRBDVolumeName(srcVol.Volume, lastSnap, false, true)
+		err = d.copyVolumeDiff(sourceVolumeName, targetVolumeName, prev)
 		if err != nil {
 			return err
 		}
 
-		revert.Add(func() { _ = d.rbdDeleteVolumeSnapshot(vol, snap) })
+		revert.Add(func() { _ = d.rbdDeleteVolumeSnapshot(vol.Volume, snap) })
 
 		snapVol, err := vol.NewSnapshot(snap)
 		if err != nil {
@@ -499,14 +503,14 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 	}
 
 	// Copy snapshot.
-	sourceVolumeName := d.getRBDVolumeName(srcVol, "", false, true)
+	sourceVolumeName := d.getRBDVolumeName(srcVol.Volume, "", false, true)
 
-	err = d.copyWithSnapshots(sourceVolumeName, targetVolumeName, lastSnap)
+	err = d.copyVolumeDiff(sourceVolumeName, targetVolumeName, lastSnap)
 	if err != nil {
 		return err
 	}
 
-	err = postCreateTasks(vol)
+	err = postCreateTasks(vol.Volume)
 	if err != nil {
 		return err
 	}
@@ -516,91 +520,139 @@ func (d *ceph) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots boo
 }
 
 // CreateVolumeFromMigration creates a volume being sent via a migration.
-func (d *ceph) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
-	if volTargetArgs.ClusterMoveSourceName != "" {
-		err := vol.EnsureMountPath()
-		if err != nil {
-			return err
-		}
+// It returns the cleanup hooks required to revert any changes made during the migration.
+func (d *ceph) createVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) (revert.Hook, error) {
+	// Handle simple rsync and block_and_rsync through generic.
+	if shared.ValueInSlice(volTargetArgs.MigrationType.FSType, []migration.MigrationFSType{migration.MigrationFSType_RSYNC, migration.MigrationFSType_BLOCK_AND_RSYNC}) || volTargetArgs.MigrationType.FSType == migration.MigrationFSType_RBD_AND_RSYNC && vol.contentType == ContentTypeFS {
+		return genericVFSCreateVolumeFromMigration(d, nil, vol, conn, volTargetArgs, preFiller, op)
+	} else if !shared.ValueInSlice(volTargetArgs.MigrationType.FSType, []migration.MigrationFSType{migration.MigrationFSType_RBD, migration.MigrationFSType_RBD_AND_RSYNC}) {
+		return nil, ErrNotSupported
+	}
 
-		if vol.IsVMBlock() {
-			fsVol := vol.NewVMBlockFilesystemVolume()
-			err := d.CreateVolumeFromMigration(fsVol, conn, volTargetArgs, preFiller, op)
-			if err != nil {
-				return err
+	var lastCommonSnapshotName string
+	lastCommonSnapshotIndex := d.findLastCommonSnapshotIndex(vol.Snapshots, volTargetArgs.Snapshots)
+	if lastCommonSnapshotIndex >= 0 {
+		_, lastCommonSnapshotName, _ = api.GetParentAndSnapshotName(vol.Snapshots[lastCommonSnapshotIndex].name)
+	}
+
+	if lastCommonSnapshotName != "" {
+		// Remove all snapshots from the target that will get refreshed.
+		// Those are all the snapshots after the last common snapshot.
+		lastCommonSnapshotFound := false
+		for _, targetSnapshot := range vol.Snapshots {
+			_, targetSnapshotName, _ := api.GetParentAndSnapshotName(targetSnapshot.name)
+			if targetSnapshotName == lastCommonSnapshotName {
+				// The last common snapshot was found.
+				// Continue the loop and start to delete all of the following snapshots.
+				lastCommonSnapshotFound = true
+				continue
+			}
+
+			// Delete all of the snapshots after the last common snapshot.
+			if lastCommonSnapshotFound {
+				ok, err := d.hasVolume(d.getRBDVolumeName(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName), false, false))
+				if err != nil {
+					return nil, err
+				}
+
+				// The snapshot does not exist on the target.
+				if !ok {
+					continue
+				}
+
+				// Delete the snapshot if its order is out of sync.
+				// This happens if not the latest snapshot on the target side gets deleted and requires refresh.
+				_, err = d.deleteVolumeSnapshot(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName))
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
-		return nil
-	}
-
-	// Handle simple rsync and block_and_rsync through generic.
-	if volTargetArgs.MigrationType.FSType == migration.MigrationFSType_RSYNC || volTargetArgs.MigrationType.FSType == migration.MigrationFSType_BLOCK_AND_RSYNC {
-		return genericVFSCreateVolumeFromMigration(d, nil, vol, conn, volTargetArgs, preFiller, op)
-	} else if volTargetArgs.MigrationType.FSType != migration.MigrationFSType_RBD {
-		return ErrNotSupported
-	}
-
-	if vol.IsVMBlock() {
-		fsVol := vol.NewVMBlockFilesystemVolume()
-		err := d.CreateVolumeFromMigration(fsVol, conn, volTargetArgs, preFiller, op)
+		// Before syncing the snapshots restore the target to the last common snapshot.
+		// This is required so that the target volume is at the exact same state as the source volume.
+		// We can then use the Ceph RBD export-diff/import-diff functions to create the delta
+		// between the latest snapshot and source volume and apply it on the target volume.
+		err := d.restoreVolume(vol.Volume, vol.Snapshots[lastCommonSnapshotIndex], op)
 		if err != nil {
-			return err
+			return nil, err
+		}
+	} else {
+		// In case of refresh first delete the already existing volume.
+		if volTargetArgs.Refresh {
+			// There isn't a common snapshot on the target volume.
+			// Delete the volume as we will create a new sparse copy.
+			_, err := d.deleteVolume(vol.Volume)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Recreate the volume.
+		// A filler is not required since the source diff will be applied.
+		// The snapshots will get synced later using the optimized approach.
+		// if the volume is of type snapshot, it will get recreated later from copy.
+		err := d.rbdCreateVolume(vol.Volume, vol.ConfigSize())
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	recvName := d.getRBDVolumeName(vol, "", false, true)
-
-	volExists, err := d.HasVolume(vol)
+	err := vol.Volume.EnsureMountPath()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if !volExists {
-		err := d.rbdCreateVolume(vol, "0")
-		if err != nil {
-			return err
-		}
-	}
+	revert := revert.New()
+	defer revert.Fail()
 
-	err = vol.EnsureMountPath()
-	if err != nil {
-		return err
-	}
+	targetVolumeName := d.getRBDVolumeName(vol.Volume, "", false, true)
 
-	// Handle rbd migration.
 	if len(volTargetArgs.Snapshots) > 0 {
-		// Create the parent directory.
-		err := createParentSnapshotDirIfMissing(d.name, vol.volType, vol.name)
-		if err != nil {
-			return err
-		}
+		lastCommonSnapshotFound := false
 
-		// Transfer the snapshots.
-		for _, snapName := range volTargetArgs.Snapshots {
-			fullSnapshotName := d.getRBDVolumeName(vol, snapName, false, true)
+		for _, targetSnapshot := range vol.Snapshots {
+			_, targetSnapshotName, _ := api.GetParentAndSnapshotName(targetSnapshot.name)
+			if targetSnapshotName == lastCommonSnapshotName {
+				// The last common snapshot was found.
+				// Continue the loop and start to refresh all of the following snapshots.
+				lastCommonSnapshotFound = true
+				continue
+			}
+
+			// Skip this snapshot if the last common one hasn't been found.
+			// In case there is no last common snapshot start refreshing from the first snapshot onwards.
+			if !lastCommonSnapshotFound && lastCommonSnapshotName != "" {
+				continue
+			}
+
+			fullSnapshotName := d.getRBDVolumeName(vol.Volume, targetSnapshotName, false, true)
 			wrapper := migration.ProgressWriter(op, "fs_progress", fullSnapshotName)
 
-			err = d.receiveVolume(recvName, conn, wrapper)
+			err := d.receiveVolume(targetVolumeName, conn, wrapper)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
-			snapVol, err := vol.NewSnapshot(snapName)
+			snapVol, err := vol.NewSnapshot(targetSnapshotName)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			err = snapVol.EnsureMountPath()
 			if err != nil {
-				return err
+				return nil, err
 			}
+
+			// Ensure to cleanup the snapshot on the target volume in case of error.
+			// When retrying the migration there shouldn't be any left over snapshot from before.
+			revert.Add(func() { _, _ = d.deleteVolumeSnapshot(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName)) })
 		}
 	}
 
 	defer func() {
 		// Delete all migration-send-* snapshots.
-		snaps, err := d.rbdListVolumeSnapshots(vol)
+		snaps, err := d.rbdListVolumeSnapshots(vol.Volume)
 		if err != nil {
 			return
 		}
@@ -610,37 +662,298 @@ func (d *ceph) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, vo
 				continue
 			}
 
-			_ = d.rbdDeleteVolumeSnapshot(vol, snap)
+			_ = d.rbdDeleteVolumeSnapshot(vol.Volume, snap)
 		}
 	}()
 
 	wrapper := migration.ProgressWriter(op, "fs_progress", vol.name)
 
-	err = d.receiveVolume(recvName, conn, wrapper)
+	// Apply the diff.
+	err = d.receiveVolume(targetVolumeName, conn, wrapper)
+	if err != nil {
+		return nil, err
+	}
+
+	cleanup := revert.Clone().Fail
+	revert.Success()
+	return cleanup, nil
+}
+
+// CreateVolumeFromMigration creates a volume being sent via a migration.
+func (d *ceph) CreateVolumeFromMigration(vol VolumeCopy, conn io.ReadWriteCloser, volTargetArgs migration.VolumeTargetArgs, preFiller *VolumeFiller, op *operations.Operation) error {
+	if volTargetArgs.ClusterMoveSourceName != "" {
+		err := vol.EnsureMountPath()
+		if err != nil {
+			return err
+		}
+
+		if vol.IsVMBlock() {
+			fsVol := NewVolumeCopy(vol.NewVMBlockFilesystemVolume())
+			err := d.CreateVolumeFromMigration(fsVol, conn, volTargetArgs, preFiller, op)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	revert := revert.New()
+	defer revert.Fail()
+
+	// Migrate (receive) the VMs filesystem volume too.
+	// This will fall back to the generic way of refreshing.
+	if vol.IsVMBlock() {
+		// Ensure that the volume's snapshots are also replaced with their filesystem counterpart.
+		fsVolSnapshots := make([]Volume, 0, len(vol.Snapshots))
+		for _, snapshot := range vol.Snapshots {
+			fsVolSnapshots = append(fsVolSnapshots, snapshot.NewVMBlockFilesystemVolume())
+		}
+
+		fsVolCopy := NewVolumeCopy(vol.NewVMBlockFilesystemVolume(), fsVolSnapshots...)
+
+		// Migrate the VMs filesystem volume and record the cleanup hooks.
+		// This allows cleaning up any changes made during the generic migration.
+		cleanup, err := d.createVolumeFromMigration(fsVolCopy, conn, volTargetArgs, preFiller, op)
+		if err != nil {
+			return err
+		}
+
+		revert.Add(cleanup)
+	}
+
+	// Migrate the actual volume and record the cleanup hooks.
+	cleanup, err := d.createVolumeFromMigration(vol, conn, volTargetArgs, preFiller, op)
 	if err != nil {
 		return err
 	}
 
-	// Map the RBD volume.
-	devPath, err := d.rbdMapVolume(vol)
-	if err != nil {
-		return err
-	}
+	revert.Add(cleanup)
 
-	defer func() { _ = d.rbdUnmapVolume(vol, true) }()
-
-	// Re-generate the UUID.
-	err = d.generateUUID(vol.ConfigBlockFilesystem(), devPath)
-	if err != nil {
-		return err
-	}
-
+	revert.Success()
 	return nil
 }
 
+// refreshVolume updates an existing volume to match the state of another.
+// It returns the cleanup hooks required to revert any changes made during the refresh.
+func (d *ceph) refreshVolume(vol VolumeCopy, srcVol VolumeCopy, refreshSnapshots []string, allowInconsistent bool, op *operations.Operation) (revert.Hook, error) {
+	// Copy volumes with content type filesystem using the generic approach.
+	if vol.contentType == ContentTypeFS {
+		return genericVFSCopyVolume(d, nil, vol, srcVol, refreshSnapshots, true, allowInconsistent, op)
+	}
+
+	var lastCommonSnapshotName string
+	lastCommonSnapshotIndex := d.findLastCommonSnapshotIndex(vol.Snapshots, refreshSnapshots)
+	if lastCommonSnapshotIndex >= 0 {
+		_, lastCommonSnapshotName, _ = api.GetParentAndSnapshotName(vol.Snapshots[lastCommonSnapshotIndex].name)
+	}
+
+	if lastCommonSnapshotName != "" {
+		// Remove all snapshots from the target that will get refreshed.
+		// Those are all the snapshots after the last common snapshot.
+		lastCommonSnapshotFound := false
+		for _, targetSnapshot := range vol.Snapshots {
+			_, targetSnapshotName, _ := api.GetParentAndSnapshotName(targetSnapshot.name)
+			if targetSnapshotName == lastCommonSnapshotName {
+				// The last common snapshot was found.
+				// Continue the loop and start to delete all of the following snapshots.
+				lastCommonSnapshotFound = true
+				continue
+			}
+
+			// Delete all of the snapshots after the last common snapshot.
+			if lastCommonSnapshotFound {
+				ok, err := d.hasVolume(d.getRBDVolumeName(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName), false, false))
+				if err != nil {
+					return nil, err
+				}
+
+				// The snapshot does not exist on the target.
+				if !ok {
+					continue
+				}
+
+				// Delete the snapshot if its order is out of sync.
+				// This happens if not the latest snapshot on the target side gets deleted and requires refresh.
+				// The VMs filesystem volume snapshot will not be deleted.
+				// It already got refreshed using the generic approach.
+				_, err = d.deleteVolumeSnapshot(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName))
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		// Before syncing the snapshots restore the target to the last common snapshot.
+		// This is required so that the target volume is at the exact same state as the source volume.
+		// We can then use the Ceph RBD export-diff/import-diff functions to create the delta
+		// between the latest snapshot and source volume and apply it on the target volume.
+		// The VMs filesystem volume will not be restored.
+		// It already got refreshed using the generic approach.
+		err := d.restoreVolume(vol.Volume, vol.Snapshots[lastCommonSnapshotIndex], op)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// There isn't a common snapshot on the target volume.
+		// Delete the volume as we will create a new sparse copy.
+		// The VMs filesystem volume will not be deleted.
+		// It already got refreshed using the generic approach.
+		_, err := d.deleteVolume(vol.Volume)
+		if err != nil {
+			return nil, err
+		}
+
+		// Recreate the volume.
+		// A filler is not required since the source diff will be applied.
+		// The snapshots will get synced at a later step.
+		// If the volume is of type snapshot, it will get recreated later from copy.
+		if !srcVol.IsSnapshot() {
+			// The VMs filesystem volume will not be recreated.
+			// It already got refreshed using the generic approach.
+			err := d.rbdCreateVolume(vol.Volume, vol.ConfigSize())
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if srcVol.IsSnapshot() {
+		// The target volume was just deleted in the step before
+		// as there isn't any common snapshot when refreshing a volume from a snapshot.
+		// Simply copy the source volume again to the target.
+		return nil, d.CreateVolumeFromCopy(vol, srcVol, allowInconsistent, op)
+	}
+
+	// Refreshes the targetVol by applying the sourceVol.
+	// sourceVol can either be a volume or snapshot.
+	// The optional sourceParentSnap can be provided to refresh only the diff between sourceSnap and sourceParentSnap.
+	refresh := func(sourceVol Volume, targetVol Volume, sourceParentSnap string) error {
+		// If sourceVol is a snapshot append the prefix to the snapshots name to match the name of the actual snapshot.
+		_, sourceSnapName, _ := api.GetParentAndSnapshotName(sourceVol.Name())
+		if sourceSnapName != "" {
+			sourceSnapName = fmt.Sprintf("snapshot_%s", sourceSnapName)
+		}
+
+		fullSourceSnapName := d.getRBDVolumeName(sourceVol, sourceSnapName, false, true)
+		fullTargetVolName := d.getRBDVolumeName(targetVol, "", false, true)
+
+		return d.copyVolumeDiff(fullSourceSnapName, fullTargetVolName, sourceParentSnap)
+	}
+
+	revert := revert.New()
+	defer revert.Fail()
+
+	var lastSnap string
+
+	// Create all missing snapshots on the target using an incremental stream.
+	// Iterate over the source volume's snashots to be able to use them directly for the refresh.
+	// If snapshots should be refreshed, the lists of source and target snapshots are equal.
+	if len(refreshSnapshots) > 0 {
+		lastCommonSnapshotFound := false
+
+		for i, sourceSnapshot := range srcVol.Snapshots {
+			_, sourceSnapshotName, _ := api.GetParentAndSnapshotName(sourceSnapshot.name)
+			if sourceSnapshotName == lastCommonSnapshotName {
+				// The last common snapshot was found.
+				// Continue the loop and start to refresh all of the following snapshots.
+				lastCommonSnapshotFound = true
+				continue
+			}
+
+			// Skip this snapshot if the last common one hasn't been found.
+			// In case there is no last common snapshot start refreshing from the first snapshot onwards.
+			if !lastCommonSnapshotFound && lastCommonSnapshotName != "" {
+				continue
+			}
+
+			var sourceParentSnapshotName string
+
+			// If the sourceSnap doesn't have any parent we cannot set srcParentSnapName.
+			// In this case the first snapshot gets transferred completely without being able to create a diff.
+			// This also happens if the snapshot doesn't yet exist on the target.
+			if i > 0 {
+				_, sourceParentSnapshotName, _ = api.GetParentAndSnapshotName(vol.Snapshots[i-1].name)
+				sourceParentSnapshotName = fmt.Sprintf("snapshot_%s", sourceParentSnapshotName)
+			}
+
+			lastSnap = sourceParentSnapshotName
+
+			err := refresh(sourceSnapshot, vol.Volume, sourceParentSnapshotName)
+			if err != nil {
+				return nil, err
+			}
+
+			// Ensure to cleanup the snapshot on the target volume in case of error.
+			// When retrying the refresh there shouldn't be any left over snapshot from before.
+			revert.Add(func() { _, _ = d.deleteVolumeSnapshot(vol.Volume, fmt.Sprintf("snapshot_%s", sourceSnapshotName)) })
+		}
+	}
+
+	// A diff to the latest snapshot can only be created if the source and target volume
+	// have at least one common snapshot.
+	// Also when refreshing only the instance, take the last common snapshot to create
+	// the smallest possible diff.
+	// After refreshing the snapshots, the last common snapshot has now been changed to the latest one present on the target.
+	if len(vol.Snapshots) > 0 {
+		_, lastCommonSnapshotName, _ := api.GetParentAndSnapshotName(vol.Snapshots[len(vol.Snapshots)-1].name)
+		lastSnap = fmt.Sprintf("snapshot_%s", lastCommonSnapshotName)
+	}
+
+	// Apply the diff on the target volume.
+	// If commonSnap is set only the diff from the last common snapshot gets refreshed.
+	err := refresh(srcVol.Volume, vol.Volume, lastSnap)
+	if err != nil {
+		return nil, err
+	}
+
+	cleanup := revert.Clone().Fail
+	revert.Success()
+	return cleanup, nil
+}
+
 // RefreshVolume updates an existing volume to match the state of another.
-func (d *ceph) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, allowInconsistent bool, op *operations.Operation) error {
-	return genericVFSCopyVolume(d, nil, vol, srcVol, srcSnapshots, true, allowInconsistent, op)
+func (d *ceph) RefreshVolume(vol VolumeCopy, srcVol VolumeCopy, refreshSnapshots []string, allowInconsistent bool, op *operations.Operation) error {
+	revert := revert.New()
+	defer revert.Fail()
+
+	// Refresh the VMs filesystem volume too.
+	// This will fall back to the generic way of refreshing.
+	if srcVol.IsVMBlock() {
+		// Ensure that the volume's snapshots are also replaced with their filesystem counterpart.
+		srcFsVolSnapshots := make([]Volume, 0, len(srcVol.Snapshots))
+		for _, snapshot := range srcVol.Snapshots {
+			srcFsVolSnapshots = append(srcFsVolSnapshots, snapshot.NewVMBlockFilesystemVolume())
+		}
+
+		fsVolSnapshots := make([]Volume, 0, len(vol.Snapshots))
+		for _, snapshot := range vol.Snapshots {
+			fsVolSnapshots = append(fsVolSnapshots, snapshot.NewVMBlockFilesystemVolume())
+		}
+
+		srcFsVolCopy := NewVolumeCopy(srcVol.NewVMBlockFilesystemVolume(), srcFsVolSnapshots...)
+		fsVolCopy := NewVolumeCopy(vol.NewVMBlockFilesystemVolume(), fsVolSnapshots...)
+
+		// Refresh the VMs filesystem volume and record the cleanup hooks.
+		// This allows cleaning up any changes made during the generic refresh.
+		cleanup, err := d.refreshVolume(fsVolCopy, srcFsVolCopy, refreshSnapshots, allowInconsistent, op)
+		if err != nil {
+			return err
+		}
+
+		revert.Add(cleanup)
+	}
+
+	// Refresh the actual volume and record the cleanup hooks.
+	cleanup, err := d.refreshVolume(vol, srcVol, refreshSnapshots, allowInconsistent, op)
+	if err != nil {
+		return err
+	}
+
+	revert.Add(cleanup)
+
+	revert.Success()
+	return nil
 }
 
 // DeleteVolume deletes a volume of the storage device. If any snapshots of the volume remain then
@@ -801,15 +1114,20 @@ func (d *ceph) FillVolumeConfig(vol Volume) error {
 	// Only validate filesystem config keys for filesystem volumes or VM block volumes (which have an
 	// associated filesystem volume).
 	if vol.ContentType() == ContentTypeFS || vol.IsVMBlock() {
-		// Inherit filesystem from pool if not set.
-		if vol.config["block.filesystem"] == "" {
-			vol.config["block.filesystem"] = d.config["volume.block.filesystem"]
-		}
-
-		// Default filesystem if neither volume nor pool specify an override.
-		if vol.config["block.filesystem"] == "" {
-			// Unchangeable volume property: Set unconditionally.
+		// VM volumes will always use the default filesystem.
+		if vol.IsVMBlock() {
 			vol.config["block.filesystem"] = DefaultFilesystem
+		} else {
+			// Inherit filesystem from pool if not set.
+			if vol.config["block.filesystem"] == "" {
+				vol.config["block.filesystem"] = d.config["volume.block.filesystem"]
+			}
+
+			// Default filesystem if neither volume nor pool specify an override.
+			if vol.config["block.filesystem"] == "" {
+				// Unchangeable volume property: Set unconditionally.
+				vol.config["block.filesystem"] = DefaultFilesystem
+			}
 		}
 
 		// Inherit filesystem mount options from pool if not set.
@@ -830,14 +1148,40 @@ func (d *ceph) FillVolumeConfig(vol Volume) error {
 // commonVolumeRules returns validation rules which are common for pool and volume.
 func (d *ceph) commonVolumeRules() map[string]func(value string) error {
 	return map[string]func(value string) error{
-		"block.filesystem":    validate.Optional(validate.IsOneOf(blockBackedAllowedFilesystems...)),
+		// lxdmeta:generate(entities=storage-ceph,storage-lvm; group=volume-conf; key=block.filesystem)
+		// Valid options are: `btrfs`, `ext4`, `xfs`
+		// If not set, `ext4` is assumed.
+		// ---
+		//  type: string
+		//  condition: block-based volume with content type `filesystem`
+		//  defaultdesc: same as `volume.block.filesystem`
+		//  shortdesc: File system of the storage volume
+		"block.filesystem": validate.Optional(validate.IsOneOf(blockBackedAllowedFilesystems...)),
+		// lxdmeta:generate(entities=storage-ceph,storage-lvm; group=volume-conf; key=block.mount_options)
+		//
+		// ---
+		//  type: string
+		//  condition: block-based volume with content type `filesystem`
+		//  defaultdesc: same as `volume.block.mount_options`
+		//  shortdesc: Mount options for block-backed file system volumes
 		"block.mount_options": validate.IsAny,
 	}
 }
 
 // ValidateVolume validates the supplied volume config.
 func (d *ceph) ValidateVolume(vol Volume, removeUnknownKeys bool) error {
-	return d.validateVolume(vol, d.commonVolumeRules(), removeUnknownKeys)
+	commonRules := d.commonVolumeRules()
+
+	// Disallow block.* settings for regular custom block volumes. These settings only make sense
+	// when using custom filesystem volumes. LXD will create the filesystem
+	// for these volumes, and use the mount options. When attaching a regular block volume to a VM,
+	// these are not mounted by LXD and therefore don't need these config keys.
+	if vol.volType == VolumeTypeCustom && vol.contentType == ContentTypeBlock {
+		delete(commonRules, "block.filesystem")
+		delete(commonRules, "block.mount_options")
+	}
+
+	return d.validateVolume(vol, commonRules, removeUnknownKeys)
 }
 
 // UpdateVolume applies config changes to the volume.
@@ -1165,7 +1509,11 @@ func (d *ceph) ListVolumes() ([]Volume, error) {
 
 // MountVolume mounts a volume and increments ref counter. Please call UnmountVolume() when done with the volume.
 func (d *ceph) MountVolume(vol Volume, op *operations.Operation) error {
-	unlock := vol.MountLock()
+	unlock, err := vol.MountLock()
+	if err != nil {
+		return err
+	}
+
 	defer unlock()
 
 	revert := revert.New()
@@ -1225,10 +1573,13 @@ func (d *ceph) MountVolume(vol Volume, op *operations.Operation) error {
 // UnmountVolume simulates unmounting a volume.
 // keepBlockDev indicates if backing block device should be not be unmapped if volume is unmounted.
 func (d *ceph) UnmountVolume(vol Volume, keepBlockDev bool, op *operations.Operation) (bool, error) {
-	unlock := vol.MountLock()
+	unlock, err := vol.MountLock()
+	if err != nil {
+		return false, err
+	}
+
 	defer unlock()
 
-	var err error
 	ourUnmount := false
 	mountPath := vol.MountPath()
 
@@ -1327,13 +1678,13 @@ func (d *ceph) RenameVolume(vol Volume, newVolName string, op *operations.Operat
 }
 
 // MigrateVolume sends a volume for migration.
-func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
+func (d *ceph) MigrateVolume(vol VolumeCopy, conn io.ReadWriteCloser, volSrcArgs *migration.VolumeSourceArgs, op *operations.Operation) error {
 	if volSrcArgs.ClusterMove {
 		return nil // When performing a cluster member move don't do anything on the source member.
 	}
 
 	// Handle simple rsync and block_and_rsync through generic.
-	if volSrcArgs.MigrationType.FSType == migration.MigrationFSType_RSYNC || volSrcArgs.MigrationType.FSType == migration.MigrationFSType_BLOCK_AND_RSYNC {
+	if shared.ValueInSlice(volSrcArgs.MigrationType.FSType, []migration.MigrationFSType{migration.MigrationFSType_RSYNC, migration.MigrationFSType_BLOCK_AND_RSYNC}) || volSrcArgs.MigrationType.FSType == migration.MigrationFSType_RBD_AND_RSYNC && vol.contentType == ContentTypeFS {
 		// TODO this should take a temporary snapshot.
 		// Before doing a generic volume migration, we need to ensure volume (or snap volume parent) is
 		// activated to avoid issues activating the snapshot volume device.
@@ -1347,7 +1698,7 @@ func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mi
 		defer func() { _, _ = d.UnmountVolume(parentVol, false, op) }()
 
 		return genericVFSMigrateVolume(d, d.state, vol, conn, volSrcArgs, op)
-	} else if volSrcArgs.MigrationType.FSType != migration.MigrationFSType_RBD {
+	} else if !shared.ValueInSlice(volSrcArgs.MigrationType.FSType, []migration.MigrationFSType{migration.MigrationFSType_RBD, migration.MigrationFSType_RBD_AND_RSYNC}) {
 		return ErrNotSupported
 	}
 
@@ -1357,27 +1708,53 @@ func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mi
 		return fmt.Errorf("MultiSync should not be used with optimized migration")
 	}
 
+	// Migrate (send) the VMs filesystem volume too.
+	// This will recursively call this function again and fall back to the generic way of refreshing.
 	if vol.IsVMBlock() {
-		fsVol := vol.NewVMBlockFilesystemVolume()
-		err := d.MigrateVolume(fsVol, conn, volSrcArgs, op)
+		// Ensure that the volume's snapshots are also replaced with their filesystem counterpart.
+		fsVolSnapshots := make([]Volume, 0, len(vol.Snapshots))
+		for _, snapshot := range vol.Snapshots {
+			fsVolSnapshots = append(fsVolSnapshots, snapshot.NewVMBlockFilesystemVolume())
+		}
+
+		fsVolCopy := NewVolumeCopy(vol.NewVMBlockFilesystemVolume(), fsVolSnapshots...)
+
+		err := d.MigrateVolume(fsVolCopy, conn, volSrcArgs, op)
 		if err != nil {
 			return err
 		}
 	}
 
 	if vol.IsSnapshot() {
-		parentName, snapOnlyName, _ := api.GetParentAndSnapshotName(vol.name)
-		sendName := fmt.Sprintf("%s/snapshots_%s_%s_start_clone", d.name, parentName, snapOnlyName)
-
-		cloneVol := NewVolume(d, d.name, vol.volType, vol.contentType, vol.name, nil, nil)
-
-		// Mounting the volume snapshot will create the clone "snapshots_<parent>_<snap>_start_clone".
-		err := d.MountVolumeSnapshot(cloneVol, op)
+		unlock, err := vol.MountLock()
 		if err != nil {
 			return err
 		}
 
-		defer func() { _, _ = d.UnmountVolumeSnapshot(cloneVol, op) }()
+		defer unlock()
+
+		parentName, snapOnlyName, _ := api.GetParentAndSnapshotName(vol.name)
+		snapOnlyName = fmt.Sprintf("snapshot_%s", snapOnlyName)
+		parentVol := NewVolume(d, vol.pool, vol.volType, vol.contentType, parentName, nil, nil)
+		cloneVol := NewVolume(d, vol.pool, vol.volType, vol.contentType, fmt.Sprintf("%s_clone", parentName), nil, nil)
+
+		// Ensure the snapshot is protected so that it allows creating a clone from it.
+		err = d.rbdProtectVolumeSnapshot(parentVol, snapOnlyName)
+		if err != nil {
+			return err
+		}
+
+		defer func() { _ = d.rbdUnprotectVolumeSnapshot(parentVol, snapOnlyName) }()
+
+		// Create a clone from the volumes snapshot which can then be migrated.
+		err = d.rbdCreateClone(parentVol, snapOnlyName, cloneVol)
+		if err != nil {
+			return err
+		}
+
+		defer func() { _ = d.rbdDeleteVolume(cloneVol) }()
+
+		sendSnapName := d.getRBDVolumeName(cloneVol, "", false, true)
 
 		// Setup progress tracking.
 		var wrapper *ioprogress.ProgressTracker
@@ -1385,39 +1762,70 @@ func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mi
 			wrapper = migration.ProgressTracker(op, "fs_progress", vol.name)
 		}
 
-		err = d.sendVolume(conn, sendName, "", wrapper)
-		if err != nil {
-			return err
-		}
-
-		return nil
+		return d.sendVolume(conn, sendSnapName, "", wrapper)
 	}
 
-	lastSnap := ""
+	var lastSnap string
+	var lastCommonSnapshotName string
+	lastCommonSnapshotIndex := d.findLastCommonSnapshotIndex(vol.Snapshots, volSrcArgs.Snapshots)
+	if lastCommonSnapshotIndex >= 0 {
+		_, lastCommonSnapshotName, _ = api.GetParentAndSnapshotName(vol.Snapshots[lastCommonSnapshotIndex].name)
+	}
 
-	for i, snapName := range volSrcArgs.Snapshots {
-		snapshot, _ := vol.NewSnapshot(snapName)
+	// Create all missing snapshots on the target using an incremental stream.
+	// Iterate over the source volume's snashots to be able to use them directly for the refresh.
+	// If snapshots should be refreshed, the lists of source and target snapshots are equal.
+	if len(volSrcArgs.Snapshots) > 0 {
+		lastCommonSnapshotFound := false
 
-		prev := ""
+		for i, targetSnapshot := range vol.Snapshots {
+			_, targetSnapshotName, _ := api.GetParentAndSnapshotName(targetSnapshot.name)
+			if targetSnapshotName == lastCommonSnapshotName {
+				// The last common snapshot was found.
+				// Continue the loop and start to refresh all of the following snapshots.
+				lastCommonSnapshotFound = true
+				continue
+			}
 
-		if i > 0 {
-			prev = fmt.Sprintf("snapshot_%s", volSrcArgs.Snapshots[i-1])
+			// Skip this snapshot if the last common one hasn't been found.
+			// In case there is no last common snapshot start refreshing from the first snapshot onwards.
+			if !lastCommonSnapshotFound && lastCommonSnapshotName != "" {
+				continue
+			}
+
+			var sourceParentSnapshotName string
+
+			// If the sourceSnap doesn't have any parent we cannot set srcParentSnapName.
+			// In this case the first snapshot gets transferred completely without being able to create a diff.
+			// This also happens if the snapshot doesn't yet exist on the target.
+			if i > 0 {
+				_, sourceParentSnapshotName, _ = api.GetParentAndSnapshotName(vol.Snapshots[i-1].name)
+				sourceParentSnapshotName = fmt.Sprintf("snapshot_%s", sourceParentSnapshotName)
+			}
+
+			lastSnap = sourceParentSnapshotName
+
+			// Setup progress tracking.
+			var wrapper *ioprogress.ProgressTracker
+
+			if volSrcArgs.TrackProgress {
+				wrapper = migration.ProgressTracker(op, "fs_progress", targetSnapshot.name)
+			}
+
+			sendSnapName := d.getRBDVolumeName(vol.Volume, fmt.Sprintf("snapshot_%s", targetSnapshotName), false, true)
+
+			err := d.sendVolume(conn, sendSnapName, lastSnap, wrapper)
+			if err != nil {
+				return err
+			}
 		}
+	}
 
-		lastSnap = fmt.Sprintf("snapshot_%s", snapName)
-		sendSnapName := d.getRBDVolumeName(vol, lastSnap, false, true)
-
-		// Setup progress tracking.
-		var wrapper *ioprogress.ProgressTracker
-
-		if volSrcArgs.TrackProgress {
-			wrapper = migration.ProgressTracker(op, "fs_progress", snapshot.name)
-		}
-
-		err := d.sendVolume(conn, sendSnapName, prev, wrapper)
-		if err != nil {
-			return err
-		}
+	// A diff to the latest snapshot can only be created if the source volume has at least one snapshot.
+	// Don't try to create a diff from the last snapshot in case only the volume gets migrated.
+	if len(vol.Snapshots) > 0 && !volSrcArgs.VolumeOnly {
+		_, lastCommonSnapshotName, _ := api.GetParentAndSnapshotName(vol.Snapshots[len(vol.Snapshots)-1].name)
+		lastSnap = fmt.Sprintf("snapshot_%s", lastCommonSnapshotName)
 	}
 
 	// Setup progress tracking.
@@ -1426,27 +1834,21 @@ func (d *ceph) MigrateVolume(vol Volume, conn io.ReadWriteCloser, volSrcArgs *mi
 		wrapper = migration.ProgressTracker(op, "fs_progress", vol.name)
 	}
 
-	runningSnapName := fmt.Sprintf("migration-send-%s", uuid.New())
+	runningSnapName := fmt.Sprintf("migration-send-%s", uuid.New().String())
 
-	err := d.rbdCreateVolumeSnapshot(vol, runningSnapName)
+	err := d.rbdCreateVolumeSnapshot(vol.Volume, runningSnapName)
 	if err != nil {
 		return err
 	}
 
-	defer func() { _ = d.rbdDeleteVolumeSnapshot(vol, runningSnapName) }()
+	defer func() { _ = d.rbdDeleteVolumeSnapshot(vol.Volume, runningSnapName) }()
 
-	cur := d.getRBDVolumeName(vol, runningSnapName, false, true)
-
-	err = d.sendVolume(conn, cur, lastSnap, wrapper)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	cur := d.getRBDVolumeName(vol.Volume, runningSnapName, false, true)
+	return d.sendVolume(conn, cur, lastSnap, wrapper)
 }
 
 // BackupVolume creates an exported version of a volume.
-func (d *ceph) BackupVolume(vol Volume, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
+func (d *ceph) BackupVolume(vol VolumeCopy, tarWriter *instancewriter.InstanceTarWriter, optimized bool, snapshots []string, op *operations.Operation) error {
 	return genericVFSBackupVolume(d, vol, tarWriter, snapshots, op)
 }
 
@@ -1563,7 +1965,11 @@ func (d *ceph) DeleteVolumeSnapshot(snapVol Volume, op *operations.Operation) er
 
 // MountVolumeSnapshot simulates mounting a volume snapshot.
 func (d *ceph) MountVolumeSnapshot(snapVol Volume, op *operations.Operation) error {
-	unlock := snapVol.MountLock()
+	unlock, err := snapVol.MountLock()
+	if err != nil {
+		return err
+	}
+
 	defer unlock()
 
 	revert := revert.New()
@@ -1654,12 +2060,15 @@ func (d *ceph) MountVolumeSnapshot(snapVol Volume, op *operations.Operation) err
 	return nil
 }
 
-// UnmountVolume simulates unmounting a volume snapshot.
+// UnmountVolumeSnapshot simulates unmounting a volume snapshot.
 func (d *ceph) UnmountVolumeSnapshot(snapVol Volume, op *operations.Operation) (bool, error) {
-	unlock := snapVol.MountLock()
+	unlock, err := snapVol.MountLock()
+	if err != nil {
+		return false, err
+	}
+
 	defer unlock()
 
-	var err error
 	ourUnmount := false
 	mountPath := snapVol.MountPath()
 	refCount := snapVol.MountRefCountDecrement()
@@ -1757,8 +2166,9 @@ func (d *ceph) VolumeSnapshots(vol Volume, op *operations.Operation) ([]string, 
 	return ret, nil
 }
 
-// RestoreVolume restores a volume from a snapshot.
-func (d *ceph) RestoreVolume(vol Volume, snapshotName string, op *operations.Operation) error {
+// restoreVolume restores a volume from a snapshot.
+// Use RestoreVolume if a VM's filesystem volume should get restored too.
+func (d *ceph) restoreVolume(vol Volume, snapVol Volume, op *operations.Operation) error {
 	ourUnmount, err := d.UnmountVolume(vol, false, op)
 	if err != nil {
 		return err
@@ -1767,6 +2177,8 @@ func (d *ceph) RestoreVolume(vol Volume, snapshotName string, op *operations.Ope
 	if ourUnmount {
 		defer func() { _ = d.MountVolume(vol, op) }()
 	}
+
+	_, snapshotName, _ := api.GetParentAndSnapshotName(snapVol.name)
 
 	_, err = shared.RunCommand(
 		"rbd",
@@ -1781,23 +2193,41 @@ func (d *ceph) RestoreVolume(vol Volume, snapshotName string, op *operations.Ope
 		return err
 	}
 
-	snapVol, err := vol.NewSnapshot(snapshotName)
-	if err != nil {
-		return err
-	}
-
 	// Map the RBD volume.
-	devPath, err := d.rbdMapVolume(snapVol)
+	devPath, err := d.rbdMapVolume(vol)
 	if err != nil {
 		return err
 	}
 
-	defer func() { _ = d.rbdUnmapVolume(snapVol, true) }()
+	defer func() { _ = d.rbdUnmapVolume(vol, true) }()
 
 	// Re-generate the UUID.
-	err = d.generateUUID(snapVol.ConfigBlockFilesystem(), devPath)
+	if vol.contentType == ContentTypeFS {
+		err = d.generateUUID(vol.ConfigBlockFilesystem(), devPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// RestoreVolume restores a volume from a snapshot.
+// Use restoreVolume if a VM's filesystem volume should not get restored.
+func (d *ceph) RestoreVolume(vol Volume, snapVol Volume, op *operations.Operation) error {
+	err := d.restoreVolume(vol, snapVol, op)
 	if err != nil {
 		return err
+	}
+
+	// For VM images, restore the filesystem volume too.
+	if vol.IsVMBlock() {
+		fsVol := vol.NewVMBlockFilesystemVolume()
+		fsSnapVol := snapVol.NewVMBlockFilesystemVolume()
+		err := d.restoreVolume(fsVol, fsSnapVol, op)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

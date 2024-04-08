@@ -1,7 +1,7 @@
 (projects-work)=
 # How to work with different projects
 
-If you have more projects than just the `default` profile, you must make sure to use or address the correct project when working with LXD.
+If you have more projects than just the `default` project, you must make sure to use or address the correct project when working with LXD.
 
 ```{note}
 If you have projects that are {ref}`confined to specific users <projects-confined>`, only users with full access to LXD can see all projects.
@@ -74,7 +74,7 @@ For example, to move the instance `my-instance` from the `default` project to `m
 
 ### Copy a profile to another project
 
-If you create a project with the default settings, profiles are isolated in the project ([`features.profiles`](project-features) is set to `true`).
+If you create a project with the default settings, profiles are isolated in the project ({config:option}`project-features:features.profiles` is set to `true`).
 Therefore, the project does not have access to the default profile (which is part of the `default` project), and you will see an error similar to the following when trying to create an instance:
 
 ```{terminal}

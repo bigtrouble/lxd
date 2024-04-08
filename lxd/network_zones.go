@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,7 +9,9 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	clusterRequest "github.com/canonical/lxd/lxd/cluster/request"
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/network/zone"
 	"github.com/canonical/lxd/lxd/project"
@@ -16,23 +19,24 @@ import (
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var networkZonesCmd = APIEndpoint{
 	Path: "network-zones",
 
-	Get:  APIEndpointAction{Handler: networkZonesGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Post: APIEndpointAction{Handler: networkZonesPost, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Get:  APIEndpointAction{Handler: networkZonesGet, AccessHandler: allowAuthenticated},
+	Post: APIEndpointAction{Handler: networkZonesPost, AccessHandler: allowPermission(entity.TypeProject, auth.EntitlementCanCreateNetworkZones)},
 }
 
 var networkZoneCmd = APIEndpoint{
 	Path: "network-zones/{zone}",
 
-	Delete: APIEndpointAction{Handler: networkZoneDelete, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Get:    APIEndpointAction{Handler: networkZoneGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Put:    APIEndpointAction{Handler: networkZonePut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Patch:  APIEndpointAction{Handler: networkZonePut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Delete: APIEndpointAction{Handler: networkZoneDelete, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanDelete, "zone")},
+	Get:    APIEndpointAction{Handler: networkZoneGet, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanView, "zone")},
+	Put:    APIEndpointAction{Handler: networkZonePut, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
+	Patch:  APIEndpointAction{Handler: networkZonePut, AccessHandler: allowPermission(entity.TypeNetworkZone, auth.EntitlementCanEdit, "zone")},
 }
 
 // API endpoints.
@@ -132,15 +136,27 @@ var networkZoneCmd = APIEndpoint{
 func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	recursion := util.IsRecursionRequest(r)
 
-	// Get list of Network zones.
-	zoneNames, err := s.DB.Cluster.GetNetworkZonesByProject(projectName)
+	var zoneNames []string
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Get list of Network zones.
+		zoneNames, err = tx.GetNetworkZonesByProject(ctx, projectName)
+
+		return err
+	})
+	if err != nil {
+		return response.InternalError(err)
+	}
+
+	request.SetCtxValue(r, request.CtxEffectiveProjectName, projectName)
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanView, entity.TypeNetworkZone)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -148,6 +164,10 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 	resultString := []string{}
 	resultMap := []api.NetworkZone{}
 	for _, zoneName := range zoneNames {
+		if !userHasPermission(entity.NetworkZoneURL(projectName, zoneName)) {
+			continue
+		}
+
 		if !recursion {
 			resultString = append(resultString, api.NewURL().Path(version.APIVersion, "network-zones", zoneName).String())
 		} else {
@@ -158,6 +178,7 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 
 			netzoneInfo := netzone.Info()
 			netzoneInfo.UsedBy, _ = netzone.UsedBy() // Ignore errors in UsedBy, will return nil.
+			netzoneInfo.UsedBy = project.FilterUsedBy(s.Authorizer, r, netzoneInfo.UsedBy)
 
 			resultMap = append(resultMap, *netzoneInfo)
 		}
@@ -205,7 +226,7 @@ func networkZonesGet(d *Daemon, r *http.Request) response.Response {
 func networkZonesPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -267,7 +288,7 @@ func networkZonesPost(d *Daemon, r *http.Request) response.Response {
 func networkZoneDelete(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -335,7 +356,7 @@ func networkZoneDelete(d *Daemon, r *http.Request) response.Response {
 func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -355,6 +376,8 @@ func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 	if err != nil {
 		return response.SmartError(err)
 	}
+
+	info.UsedBy = project.FilterUsedBy(s.Authorizer, r, info.UsedBy)
 
 	return response.SyncResponseETag(true, info, netzone.Etag())
 }
@@ -431,7 +454,7 @@ func networkZoneGet(d *Daemon, r *http.Request) response.Response {
 func networkZonePut(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, projectParam(r))
+	projectName, _, err := project.NetworkZoneProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}

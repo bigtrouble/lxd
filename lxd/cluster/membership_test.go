@@ -18,9 +18,10 @@ import (
 	clusterConfig "github.com/canonical/lxd/lxd/cluster/config"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
-	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/identity"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/osarch"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -130,12 +131,8 @@ func TestBootstrap(t *testing.T) {
 	// The cluster certificate is in place.
 	assert.True(t, shared.PathExists(filepath.Join(state.OS.VarDir, "cluster.crt")))
 
-	trustedCerts := func() map[dbCluster.CertificateType]map[string]x509.Certificate {
-		return nil
-	}
-
 	// The dqlite driver is now exposed over the network.
-	for path, handler := range gateway.HandlerFuncs(nil, trustedCerts) {
+	for path, handler := range gateway.HandlerFuncs(nil, &identity.Cache{}) {
 		mux.HandleFunc(path, handler)
 	}
 
@@ -288,15 +285,18 @@ func TestJoin(t *testing.T) {
 	altServerCert := shared.TestingAltKeyPair()
 	trustedAltServerCert, _ := x509.ParseCertificate(altServerCert.KeyPair().Certificate[0])
 
-	trustedCerts := func() map[dbCluster.CertificateType]map[string]x509.Certificate {
-		return map[dbCluster.CertificateType]map[string]x509.Certificate{
-			dbCluster.CertificateTypeServer: {
-				altServerCert.Fingerprint(): *trustedAltServerCert,
-			},
-		}
-	}
+	identityCache := &identity.Cache{}
+	err := identityCache.ReplaceAll([]identity.CacheEntry{
+		{
+			AuthenticationMethod: api.AuthenticationMethodTLS,
+			IdentityType:         api.IdentityTypeCertificateServer,
+			Identifier:           altServerCert.Fingerprint(),
+			Certificate:          trustedAltServerCert,
+		},
+	}, nil)
+	require.NoError(t, err)
 
-	for path, handler := range targetGateway.HandlerFuncs(nil, trustedCerts) {
+	for path, handler := range targetGateway.HandlerFuncs(nil, identityCache) {
 		targetMux.HandleFunc(path, handler)
 	}
 
@@ -307,7 +307,6 @@ func TestJoin(t *testing.T) {
 	targetStore := targetGateway.NodeStore()
 	targetDialFunc := targetGateway.DialFunc()
 
-	var err error
 	targetState.DB.Cluster, err = db.OpenCluster(context.Background(), "db.bin", targetStore, targetAddress, "/unused/db/dir", 10*time.Second, nil, driver.WithDialFunc(targetDialFunc))
 	targetState.ServerCert = func() *shared.CertInfo { return targetCert }
 	require.NoError(t, err)
@@ -336,7 +335,12 @@ func TestJoin(t *testing.T) {
 
 	err = cluster.Bootstrap(targetState, targetGateway, "buzz")
 	require.NoError(t, err)
-	_, err = targetState.DB.Cluster.GetNetworks(project.Default)
+
+	err = targetState.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_, err = tx.GetNetworks(ctx, api.ProjectDefaultName)
+
+		return err
+	})
 	require.NoError(t, err)
 
 	// Setup a joining node
@@ -353,7 +357,7 @@ func TestJoin(t *testing.T) {
 
 	defer func() { _ = gateway.Shutdown() }()
 
-	for path, handler := range gateway.HandlerFuncs(nil, trustedCerts) {
+	for path, handler := range gateway.HandlerFuncs(nil, identityCache) {
 		mux.HandleFunc(path, handler)
 	}
 

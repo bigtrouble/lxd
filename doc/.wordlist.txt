@@ -2,6 +2,7 @@ AAAA
 ABI
 ACL
 ACLs
+AGPL
 AIO
 allocator
 AMD
@@ -10,6 +11,7 @@ AppArmor
 ARMv
 ARP
 ASN
+Auth
 AXFR
 backend
 backends
@@ -25,7 +27,7 @@ BPF
 Btrfs
 bugfix
 bugfixes
-Centos
+CentOS
 Ceph
 CephFS
 Ceph's
@@ -71,6 +73,7 @@ ES
 ESA
 ETag
 failover
+firmware
 FQDNs
 gapped
 GARP
@@ -93,8 +96,9 @@ hotplug
 hotplugged
 hotplugging
 HTTPS
+HWE
 ICMP
-IPAM
+IdP
 idmap
 idmapped
 idmaps
@@ -106,6 +110,7 @@ initramfs
 integrations
 IOPS
 IOV
+IPAM
 IPs
 IPv
 IPVLAN
@@ -114,18 +119,20 @@ jq
 JSON
 kB
 kbit
+Keycloak
 KiB
 kibi
 Kibit
 KVM
 lookups
+LogCLI
 LRU
 LTS
 LV
 LVM
 LXC
-LXC's
 LXCFS
+LXC's
 LXD
 LXD's
 MAAS
@@ -138,6 +145,7 @@ MiB
 Mibit
 MicroCeph
 MicroCloud
+MinIO
 MII
 MITM
 MTU
@@ -155,9 +163,11 @@ NFS
 NIC
 NICs
 NUMA
+NVMe
 NVRAM
 OData
 OIDC
+OpenFGA
 OpenID
 OpenMetrics
 OpenSSL
@@ -165,7 +175,7 @@ OpenSUSE
 OSD
 overcommit
 overcommitting
-overlayfs
+OverlayFS
 OVMF
 OVN
 OVS
@@ -182,12 +192,17 @@ PKI
 PNG
 Pongo
 POSIX
+PowerFlex
 pre
+prepended
 preseed
 proxied
 proxying
 PTS
+qdisc
+qdiscs
 QEMU
+QFQ
 qgroup
 qgroups
 RADOS
@@ -198,6 +213,7 @@ reconfiguring
 requestor
 RESTful
 RHEL
+rollout
 rootfs
 RSA
 rST
@@ -206,6 +222,9 @@ SATA
 scalable
 scriptlet
 SDN
+SDS
+SDT
+SeaBIOS
 Seccomp
 SEV
 SFTP
@@ -214,6 +233,7 @@ shiftfs
 SIGHUP
 SIGTERM
 simplestreams
+SKBPRIO
 SLAAC
 SMTP
 Snapcraft
@@ -223,8 +243,8 @@ SPL
 SquashFS
 SSDs
 SSL
-stateful
 Starlark
+stateful
 stderr
 stdin
 stdout
@@ -237,6 +257,7 @@ subitem
 subnet
 subnets
 subpage
+subpages
 substep
 subtree
 subtrees
@@ -255,6 +276,7 @@ TCP
 Telegraf
 TiB
 Tibit
+TinyPNG
 TLS
 tmpfs
 toolchain
@@ -268,8 +290,6 @@ UFW
 UI
 UID
 UIDs
-URI
-URIs
 unconfigured
 unevictable
 unixgram
@@ -278,14 +298,17 @@ unmount
 unmounting
 uplink
 uptime
+URI
+URIs
 userspace
 UUID
 vCPU
 vCPUs
 VDPA
-VFs
 VFS
+VFs
 VirtIO
+virtiofs
 virtualize
 virtualized
 VLAN
@@ -296,6 +319,7 @@ VPD
 VPN
 VPS
 vSwitch
+vTree
 VXLAN
 WebSocket
 WebSockets
@@ -307,4 +331,3 @@ Zettabyte
 ZFS
 zpool
 zpools
-qdisc

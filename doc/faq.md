@@ -45,7 +45,7 @@ For unprivileged containers, you need to make sure that the user in the containe
 Otherwise, all files will show up as the overflow UID/GID (`65536:65536`) and access to anything that's not world-readable will fail.
 Use either of the following methods to grant the required permissions:
 
-- Pass `shift=true` to the [`lxc config device add`](lxc_config_device_add.md) call. This depends on the kernel and file system supporting either idmapped mounts or shiftfs (see [`lxc info`](lxc_info.md)).
+- Pass `shift=true` to the [`lxc config device add`](lxc_config_device_add.md) call. This depends on the kernel and file system supporting either idmapped mounts (see [`lxc info`](lxc_info.md)).
 - Add a `raw.idmap` entry (see [Idmaps for user namespace](userns-idmap.md)).
 - Place recursive POSIX ACLs on your home directory.
 
@@ -57,9 +57,12 @@ But that's also the cause of most of the security issues with such privileged co
 ```{youtube} https://www.youtube.com/watch?v=_fCSSEyiGro
 ```
 
-To run Docker inside a LXD container, set the {config:option}`instance-security:security.nesting` property of the container to `true`:
+To run Docker inside a LXD container, set the {config:option}`instance-security:security.nesting` option of the container to `true`:
 
     lxc config set <container> security.nesting true
+
+If you plan to use the OverlayFS storage driver in Docker, you should also set the {config:option}`instance-security:security.syscalls.intercept.mknod` and {config:option}`instance-security:security.syscalls.intercept.setxattr` options to `true`.
+See [`mknod` / `mknodat`](syscall-mknod) and [`setxattr`](syscall-setxattr) for more information.
 
 Note that LXD containers cannot load kernel modules, so depending on your Docker configuration, you might need to have extra kernel modules loaded by the host.
 You can do so by setting a comma-separated list of kernel modules that your container needs:

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -57,7 +58,11 @@ func networkValidPort(value string) error {
 func RandomDevName(prefix string) string {
 	// Return a new random veth device name.
 	randBytes := make([]byte, 4)
-	rand.Read(randBytes)
+	_, err := cryptorand.Read(randBytes)
+	if err != nil {
+		return ""
+	}
+
 	iface := prefix + hex.EncodeToString(randBytes)
 	if len(iface) > 13 {
 		return ""
@@ -75,7 +80,26 @@ func MACDevName(mac net.HardwareAddr) string {
 // UsedByInstanceDevices looks for instance NIC devices using the network and runs the supplied usageFunc for each.
 // Accepts optional filter arguments to specify a subset of instances.
 func UsedByInstanceDevices(s *state.State, networkProjectName string, networkName string, networkType string, usageFunc func(inst db.InstanceArgs, nicName string, nicConfig map[string]string) error, filters ...cluster.InstanceFilter) error {
-	return s.DB.Cluster.InstanceList(context.TODO(), func(inst db.InstanceArgs, p api.Project) error {
+	// Get the instances.
+	projects := map[string]api.Project{}
+	instances := []db.InstanceArgs{}
+
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(inst db.InstanceArgs, p api.Project) error {
+			projects[inst.Project] = p
+			instances = append(instances, inst)
+
+			return nil
+		}, filters...)
+	})
+	if err != nil {
+		return err
+	}
+
+	// Go through the instances and run usageFunc.
+	for _, inst := range instances {
+		p := projects[inst.Project]
+
 		// Get the instance's effective network project name.
 		instNetworkProject := project.NetworkProjectFromRecord(&p)
 
@@ -85,7 +109,7 @@ func UsedByInstanceDevices(s *state.State, networkProjectName string, networkNam
 		}
 
 		// Look for NIC devices using this network.
-		devices := db.ExpandInstanceDevices(inst.Devices.Clone(), inst.Profiles)
+		devices := instancetype.ExpandInstanceDevices(inst.Devices.Clone(), inst.Profiles)
 		for devName, devConfig := range devices {
 			if isInUseByDevice(networkName, networkType, devConfig) {
 				err := usageFunc(inst, devName, devConfig)
@@ -94,9 +118,9 @@ func UsedByInstanceDevices(s *state.State, networkProjectName string, networkNam
 				}
 			}
 		}
+	}
 
-		return nil
-	}, filters...)
+	return nil
 }
 
 // UsedBy returns list of API resources using network. Accepts firstOnly argument to indicate that only the first
@@ -107,7 +131,13 @@ func UsedBy(s *state.State, networkProjectName string, networkID int64, networkN
 
 	// If managed network being passed in, check if it has any peerings in a created state.
 	if networkID > 0 {
-		peers, err := s.DB.Cluster.GetNetworkPeers(networkID)
+		var peers map[int64]*api.NetworkPeer
+
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			peers, err = tx.GetNetworkPeers(ctx, networkID)
+
+			return err
+		})
 		if err != nil {
 			return nil, fmt.Errorf("Failed getting network peers: %w", err)
 		}
@@ -125,7 +155,7 @@ func UsedBy(s *state.State, networkProjectName string, networkID int64, networkN
 	}
 
 	// Only networks defined in the default project can be used by other networks. Cheapest to do.
-	if networkProjectName == project.Default {
+	if networkProjectName == api.ProjectDefaultName {
 		// Get all managed networks across all projects.
 		var projectNetworks map[string]map[int64]api.Network
 
@@ -373,8 +403,12 @@ func UpdateDNSMasqStatic(s *state.State, networkName string) error {
 	if networkName == "" {
 		var err error
 
-		// Pass project.Default here, as currently dnsmasq (bridged) networks do not support projects.
-		networks, err = s.DB.Cluster.GetNetworks(project.Default)
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Pass api.ProjectDefaultName here, as currently dnsmasq (bridged) networks do not support projects.
+			networks, err = tx.GetNetworks(ctx, api.ProjectDefaultName)
+
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -454,10 +488,10 @@ func UpdateDNSMasqStatic(s *state.State, networkName string) error {
 			continue
 		}
 
-		// Pass project.Default here, as currently dnsmasq (bridged) networks do not support projects.
-		n, err := LoadByName(s, project.Default, network)
+		// Pass api.ProjectDefaultName here, as currently dnsmasq (bridged) networks do not support projects.
+		n, err := LoadByName(s, api.ProjectDefaultName, network)
 		if err != nil {
-			return fmt.Errorf("Failed to load network %q in project %q for dnsmasq update: %w", project.Default, network, err)
+			return fmt.Errorf("Failed to load network %q in project %q for dnsmasq update: %w", api.ProjectDefaultName, network, err)
 		}
 
 		config := n.Config()
@@ -646,7 +680,7 @@ func inRoutingTable(subnet *net.IPNet) bool {
 		// Get the mask
 		var mask net.IPMask
 		if filename == "ipv6_route" {
-			size, err := strconv.ParseInt(fmt.Sprintf("0x%s", fields[1]), 0, 64)
+			size, err := strconv.ParseInt(fields[1], 16, 0)
 			if err != nil {
 				continue
 			}
@@ -935,116 +969,6 @@ func randomHwaddr(r *rand.Rand) string {
 	return ret.String()
 }
 
-// parseIPRange parses an IP range in the format "start-end" and converts it to a shared.IPRange.
-// If allowedNets are supplied, then each IP in the range is checked that it belongs to at least one of them.
-// IPs in the range can be zero prefixed, e.g. "::1" or "0.0.0.1", however they should not overlap with any
-// supplied allowedNets prefixes. If they are within an allowed network, any zero prefixed addresses are
-// returned combined with the first allowed network they are within.
-// If no allowedNets supplied they are returned as-is.
-func parseIPRange(ipRange string, allowedNets ...*net.IPNet) (*shared.IPRange, error) {
-	inAllowedNet := func(ip net.IP, allowedNet *net.IPNet) net.IP {
-		if ip == nil {
-			return nil
-		}
-
-		ipv4 := ip.To4()
-
-		// Only match IPv6 addresses against IPv6 networks.
-		if ipv4 == nil && allowedNet.IP.To4() != nil {
-			return nil
-		}
-
-		// Combine IP with network prefix if IP starts with a zero.
-		// If IP is v4, then compare against 4-byte representation, otherwise use 16 byte representation.
-		if (ipv4 != nil && ipv4[0] == 0) || (ipv4 == nil && ip[0] == 0) {
-			allowedNet16 := allowedNet.IP.To16()
-			ipCombined := make(net.IP, net.IPv6len)
-			for i, b := range ip {
-				ipCombined[i] = allowedNet16[i] | b
-			}
-
-			ip = ipCombined
-		}
-
-		// Check start IP is within one of the allowed networks.
-		if !allowedNet.Contains(ip) {
-			return nil
-		}
-
-		return ip
-	}
-
-	rangeParts := strings.SplitN(ipRange, "-", 2)
-	if len(rangeParts) != 2 {
-		return nil, fmt.Errorf("IP range %q must contain start and end IP addresses", ipRange)
-	}
-
-	startIP := net.ParseIP(rangeParts[0])
-	endIP := net.ParseIP(rangeParts[1])
-
-	if startIP == nil {
-		return nil, fmt.Errorf("Start IP %q is invalid", rangeParts[0])
-	}
-
-	if endIP == nil {
-		return nil, fmt.Errorf("End IP %q is invalid", rangeParts[1])
-	}
-
-	if bytes.Compare(startIP, endIP) > 0 {
-		return nil, fmt.Errorf("Start IP %q must be less than End IP %q", startIP, endIP)
-	}
-
-	if len(allowedNets) > 0 {
-		matchFound := false
-		for _, allowedNet := range allowedNets {
-			if allowedNet == nil {
-				return nil, fmt.Errorf("Invalid allowed network")
-			}
-
-			combinedStartIP := inAllowedNet(startIP, allowedNet)
-			if combinedStartIP == nil {
-				continue
-			}
-
-			combinedEndIP := inAllowedNet(endIP, allowedNet)
-			if combinedEndIP == nil {
-				continue
-			}
-
-			// If both match then replace parsed IPs with combined IPs and stop searching.
-			matchFound = true
-			startIP = combinedStartIP
-			endIP = combinedEndIP
-			break
-		}
-
-		if !matchFound {
-			return nil, fmt.Errorf("IP range %q does not fall within any of the allowed networks %v", ipRange, allowedNets)
-		}
-	}
-
-	return &shared.IPRange{
-		Start: startIP,
-		End:   endIP,
-	}, nil
-}
-
-// parseIPRanges parses a comma separated list of IP ranges using parseIPRange.
-func parseIPRanges(ipRangesList string, allowedNets ...*net.IPNet) ([]*shared.IPRange, error) {
-	ipRanges := strings.Split(ipRangesList, ",")
-	netIPRanges := make([]*shared.IPRange, 0, len(ipRanges))
-	for _, ipRange := range ipRanges {
-		netIPRange, err := parseIPRange(strings.TrimSpace(ipRange), allowedNets...)
-		if err != nil {
-			return nil, err
-		}
-
-		netIPRanges = append(netIPRanges, netIPRange)
-	}
-
-	return netIPRanges, nil
-}
-
 // VLANInterfaceCreate creates a VLAN interface on parent interface (if needed).
 // Returns boolean indicating if VLAN interface was created.
 func VLANInterfaceCreate(parent string, vlanDevice string, vlanID string, gvrp bool) (bool, error) {
@@ -1207,19 +1131,6 @@ func SubnetParseAppend(subnets []*net.IPNet, parseSubnet ...string) ([]*net.IPNe
 	return subnets, nil
 }
 
-// IPRangesOverlap checks whether two ip ranges have ip addresses in common.
-func IPRangesOverlap(r1, r2 *shared.IPRange) bool {
-	if r1.End == nil {
-		return r2.ContainsIP(r1.Start)
-	}
-
-	if r2.End == nil {
-		return r1.ContainsIP(r2.Start)
-	}
-
-	return r1.ContainsIP(r2.Start) || r1.ContainsIP(r2.End)
-}
-
 // InterfaceStatus returns the global unicast IP addresses configured on an interface and whether it is up or not.
 func InterfaceStatus(nicName string) ([]net.IP, bool, error) {
 	iface, err := net.InterfaceByName(nicName)
@@ -1250,18 +1161,18 @@ func InterfaceStatus(nicName string) ([]net.IP, bool, error) {
 }
 
 // ParsePortRange validates a port range in the form start-end.
-func ParsePortRange(r string) (int64, int64, error) {
+func ParsePortRange(r string) (base int64, size int64, err error) {
 	entries := strings.Split(r, "-")
 	if len(entries) > 2 {
 		return -1, -1, fmt.Errorf("Invalid port range %q", r)
 	}
 
-	base, err := strconv.ParseInt(entries[0], 10, 64)
+	base, err = strconv.ParseInt(entries[0], 10, 64)
 	if err != nil {
 		return -1, -1, err
 	}
 
-	size := int64(1)
+	size = int64(1)
 	if len(entries) > 1 {
 		size, err = strconv.ParseInt(entries[1], 10, 64)
 		if err != nil {
@@ -1311,14 +1222,14 @@ func ParseIPCIDRToNet(ipAddressCIDR string) (*net.IPNet, error) {
 
 // IPToNet converts an IP to a single host IPNet.
 func IPToNet(ip net.IP) net.IPNet {
-	len := 32
+	bits := 32
 	if ip.To4() == nil {
-		len = 128
+		bits = 128
 	}
 
 	return net.IPNet{
 		IP:   ip,
-		Mask: net.CIDRMask(len, len),
+		Mask: net.CIDRMask(bits, bits),
 	}
 }
 

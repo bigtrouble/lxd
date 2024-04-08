@@ -11,6 +11,7 @@ GOPATH ?= $(shell go env GOPATH)
 CGO_LDFLAGS_ALLOW ?= (-Wl,-wrap,pthread_create)|(-Wl,-z,now)
 SPHINXENV=doc/.sphinx/venv/bin/activate
 SPHINXPIPPATH=doc/.sphinx/venv/bin/pip
+GOMIN=1.22.0
 
 ifneq "$(wildcard vendor)" ""
 	RAFT_PATH=$(CURDIR)/vendor/raft
@@ -85,14 +86,20 @@ deps:
 	@echo "export LD_LIBRARY_PATH=\"$(RAFT_PATH)/.libs/:$(DQLITE_PATH)/.libs/\""
 	@echo "export CGO_LDFLAGS_ALLOW=\"(-Wl,-wrap,pthread_create)|(-Wl,-z,now)\""
 
-.PHONY: update
-update:
+.PHONY: update-gomod
+update-gomod:
 ifneq "$(LXD_OFFLINE)" ""
-	@echo "The update target cannot be run in offline mode."
+	@echo "The update-gomod target cannot be run in offline mode."
 	exit 1
 endif
 	go get -t -v -d -u ./...
-	go mod tidy
+	go mod tidy -go=$(GOMIN)
+	go get toolchain@none
+
+	cd test/mini-oidc && go get -t -v -d -u ./...
+	cd test/mini-oidc && go mod tidy -go=$(GOMIN)
+	cd test/mini-oidc && go get toolchain@none
+
 	@echo "Dependencies updated"
 
 .PHONY: update-protobuf
@@ -110,19 +117,24 @@ update-schema:
 .PHONY: update-api
 update-api:
 ifeq "$(LXD_OFFLINE)" ""
-	(cd / ; go install -v -x github.com/go-swagger/go-swagger/cmd/swagger@latest)
+	(cd / ; go install github.com/go-swagger/go-swagger/cmd/swagger@latest)
 endif
-	swagger generate spec -o doc/rest-api.yaml -w ./lxd -m
+	@# Generate spec and exclude package from dependency which causes a 'classifier: unknown swagger annotation "extendee"' error.
+	@# For more details see: https://github.com/go-swagger/go-swagger/issues/2917.
+	swagger generate spec -o doc/rest-api.yaml -w ./lxd -m -x github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2/options
 
 .PHONY: update-metadata
 update-metadata: build
 	@echo "Generating golang documentation metadata"
-	$(GOPATH)/bin/lxd-metadata . --json ./lxd/metadata/configuration.json --txt ./doc/config_options.txt
+	$(GOPATH)/bin/lxd-metadata . --json ./lxd/metadata/configuration.json --txt ./doc/config_options.txt --substitution-db ./doc/substitutions.yaml
 
 .PHONY: doc-setup
 doc-setup: client
 	@echo "Setting up documentation build environment"
 	python3 -m venv doc/.sphinx/venv
+	# Workaround for https://github.com/canonical/sphinx-docs-starter-pack/issues/197
+	. $(SPHINXENV) ; pip install --require-virtualenv gitpython pyyaml
+	. $(SPHINXENV) ; cd doc && LOCAL_SPHINX_BUILD=True python3 .sphinx/build_requirements.py
 	. $(SPHINXENV) ; pip install --require-virtualenv --upgrade -r doc/.sphinx/requirements.txt --log doc/.sphinx/venv/pip_install.log
 	@test ! -f doc/.sphinx/venv/pip_list.txt || \
         mv doc/.sphinx/venv/pip_list.txt doc/.sphinx/venv/pip_list.txt.bak
@@ -132,12 +144,17 @@ doc-setup: client
 	rm -Rf doc/.sphinx/.doctrees
 
 .PHONY: doc
-doc: doc-setup doc-incremental
+doc: doc-setup doc-incremental doc-objects
 
 .PHONY: doc-incremental
 doc-incremental:
 	@echo "Build the documentation"
-	. $(SPHINXENV) ; LOCAL_SPHINX_BUILD=True sphinx-build -c doc/ -b dirhtml doc/ doc/html/ -d doc/.sphinx/.doctrees -w doc/.sphinx/warnings.txt
+	. $(SPHINXENV) ; LOCAL_SPHINX_BUILD=True sphinx-build -c doc/ -b dirhtml doc/ doc/html/ -d doc/.sphinx/.doctrees -w doc/.sphinx/warnings.txt -j auto
+
+.PHONY: doc-objects
+doc-objects:
+	# provide a decoded version of objects.inv to the UI
+	. $(SPHINXENV); cd doc/html; python3 -m sphinx.ext.intersphinx 'objects.inv' > objects.inv.txt
 
 .PHONY: doc-serve
 doc-serve:
@@ -145,11 +162,11 @@ doc-serve:
 
 .PHONY: doc-spellcheck
 doc-spellcheck: doc
-	. $(SPHINXENV) ; python3 -m pyspelling -c doc/.sphinx/spellingcheck.yaml
+	. $(SPHINXENV) ; python3 -m pyspelling -c doc/.sphinx/spellingcheck.yaml -j $(shell nproc)
 
 .PHONY: doc-linkcheck
 doc-linkcheck: doc-setup
-	. $(SPHINXENV) ; LOCAL_SPHINX_BUILD=True sphinx-build -c doc/ -b linkcheck doc/ doc/html/ -d doc/.sphinx/.doctrees
+	. $(SPHINXENV) ; LOCAL_SPHINX_BUILD=True sphinx-build -c doc/ -b linkcheck doc/ doc/html/ -d doc/.sphinx/.doctrees -j auto
 
 .PHONY: doc-lint
 doc-lint:
@@ -202,9 +219,9 @@ endif
 .PHONY: check
 check: default
 ifeq "$(LXD_OFFLINE)" ""
-	(cd / ; go install -v -x github.com/rogpeppe/godeps@latest)
-	(cd / ; go install -v -x github.com/tsenart/deadcode@latest)
-	(cd / ; go install -v -x golang.org/x/lint/golint@latest)
+	(cd / ; go install github.com/rogpeppe/godeps@latest)
+	(cd / ; go install github.com/tsenart/deadcode@latest)
+	(cd / ; go install golang.org/x/lint/golint@latest)
 endif
 	CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" go test -v -tags "$(TAG_SQLITE3)" $(DEBUG) ./...
 	cd test && ./main.sh
@@ -257,7 +274,7 @@ update-po:
 .PHONY: update-pot
 update-pot:
 ifeq "$(LXD_OFFLINE)" ""
-	(cd / ; go install -v -x github.com/snapcore/snapd/i18n/xgettext-go@2.57.1)
+	(cd / ; go install github.com/snapcore/snapd/i18n/xgettext-go@2.57.1)
 endif
 	xgettext-go -o po/$(DOMAIN).pot --add-comments-tag=TRANSLATORS: --sort-output --package-name=$(DOMAIN) --msgid-bugs-address=lxd@lists.canonical.com --keyword=i18n.G --keyword-plural=i18n.NG lxc/*.go lxc/*/*.go
 
@@ -266,6 +283,9 @@ build-mo: $(MOFILES)
 
 .PHONY: static-analysis
 static-analysis:
+ifeq ($(shell command -v go-licenses),)
+	(cd / ; go install github.com/google/go-licenses@latest)
+endif
 ifeq ($(shell command -v golangci-lint),)
 	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin
 endif
@@ -281,11 +301,26 @@ ifeq ($(shell command -v flake8),)
 	echo "Please install flake8"
 	exit 1
 endif
-	golangci-lint run --timeout 5m
 	flake8 test/deps/import-busybox
-	shellcheck --shell sh test/*.sh test/includes/*.sh test/suites/*.sh test/backends/*.sh test/lint/*.sh
+	shellcheck --shell bash test/*.sh test/includes/*.sh test/suites/*.sh test/backends/*.sh test/lint/*.sh
 	shellcheck test/extras/*.sh
-	run-parts --exit-on-error --regex '.sh' test/lint
+	run-parts --verbose --exit-on-error --regex '.sh' test/lint
+
+.PHONY: staticcheck
+staticcheck:
+ifeq ($(shell command -v staticcheck),)
+	(cd / ; go install honnef.co/go/tools/cmd/staticcheck@latest)
+endif
+	# To get advance notice of deprecated function usage, consider running:
+	#   sed -i 's/^go 1\.[0-9]\+$/go 1.18/' go.mod
+	# before 'make staticcheck'.
+
+	# Run staticcheck against all the dirs containing Go files.
+	staticcheck $$(git ls-files *.go | sed 's|^|./|; s|/[^/]\+\.go$$||' | sort -u)
 
 tags: */*.go
 	find . -type f -name '*.go' | gotags -L - -f tags
+
+.PHONY: update-auth
+update-auth:
+	go generate ./lxd/auth

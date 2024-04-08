@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,7 +9,9 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	clusterRequest "github.com/canonical/lxd/lxd/cluster/request"
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/network"
 	"github.com/canonical/lxd/lxd/project"
@@ -16,23 +19,24 @@ import (
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var networkForwardsCmd = APIEndpoint{
 	Path: "networks/{networkName}/forwards",
 
-	Get:  APIEndpointAction{Handler: networkForwardsGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Post: APIEndpointAction{Handler: networkForwardsPost, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Get:  APIEndpointAction{Handler: networkForwardsGet, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanView, "networkName")},
+	Post: APIEndpointAction{Handler: networkForwardsPost, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
 }
 
 var networkForwardCmd = APIEndpoint{
 	Path: "networks/{networkName}/forwards/{listenAddress}",
 
-	Delete: APIEndpointAction{Handler: networkForwardDelete, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Get:    APIEndpointAction{Handler: networkForwardGet, AccessHandler: allowProjectPermission("networks", "view")},
-	Put:    APIEndpointAction{Handler: networkForwardPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
-	Patch:  APIEndpointAction{Handler: networkForwardPut, AccessHandler: allowProjectPermission("networks", "manage-networks")},
+	Delete: APIEndpointAction{Handler: networkForwardDelete, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanDelete, "networkName")},
+	Get:    APIEndpointAction{Handler: networkForwardGet, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanView, "networkName")},
+	Put:    APIEndpointAction{Handler: networkForwardPut, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
+	Patch:  APIEndpointAction{Handler: networkForwardPut, AccessHandler: allowPermission(entity.TypeNetwork, auth.EntitlementCanEdit, "networkName")},
 }
 
 // API endpoints
@@ -132,7 +136,7 @@ var networkForwardCmd = APIEndpoint{
 func networkForwardsGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -159,7 +163,13 @@ func networkForwardsGet(d *Daemon, r *http.Request) response.Response {
 	memberSpecific := false // Get forwards for all cluster members.
 
 	if util.IsRecursionRequest(r) {
-		records, err := s.DB.Cluster.GetNetworkForwards(r.Context(), n.ID(), memberSpecific)
+		var records map[int64]*api.NetworkForward
+
+		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			records, err = tx.GetNetworkForwards(ctx, n.ID(), memberSpecific)
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(fmt.Errorf("Failed loading network forwards: %w", err))
 		}
@@ -172,7 +182,13 @@ func networkForwardsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SyncResponse(true, forwards)
 	}
 
-	listenAddresses, err := s.DB.Cluster.GetNetworkForwardListenAddresses(n.ID(), memberSpecific)
+	var listenAddresses map[int64]string
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		listenAddresses, err = tx.GetNetworkForwardListenAddresses(ctx, n.ID(), memberSpecific)
+
+		return err
+	})
 	if err != nil {
 		return response.SmartError(fmt.Errorf("Failed loading network forwards: %w", err))
 	}
@@ -225,7 +241,7 @@ func networkForwardsPost(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -303,7 +319,7 @@ func networkForwardDelete(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -392,7 +408,7 @@ func networkForwardGet(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -421,10 +437,16 @@ func networkForwardGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	targetMember := queryParam(r, "target")
+	targetMember := request.QueryParam(r, "target")
 	memberSpecific := targetMember != ""
 
-	_, forward, err := s.DB.Cluster.GetNetworkForward(r.Context(), n.ID(), memberSpecific, listenAddress)
+	var forward *api.NetworkForward
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_, forward, err = tx.GetNetworkForward(ctx, n.ID(), memberSpecific, listenAddress)
+
+		return err
+	})
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -509,7 +531,7 @@ func networkForwardPut(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, projectParam(r))
+	projectName, reqProject, err := project.NetworkProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -545,11 +567,17 @@ func networkForwardPut(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	targetMember := queryParam(r, "target")
+	targetMember := request.QueryParam(r, "target")
 	memberSpecific := targetMember != ""
 
 	if r.Method == http.MethodPatch {
-		_, forward, err := s.DB.Cluster.GetNetworkForward(r.Context(), n.ID(), memberSpecific, listenAddress)
+		var forward *api.NetworkForward
+
+		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			_, forward, err = tx.GetNetworkForward(ctx, n.ID(), memberSpecific, listenAddress)
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(err)
 		}

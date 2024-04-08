@@ -87,13 +87,19 @@ cleanup() {
   echo "df -h output:"
   df -h
 
+  if [ "${TEST_RESULT}" != "success" ]; then
+    # dmesg may contain oops, IO errors, crashes, etc
+    echo "::group::dmesg logs"
+    journalctl --quiet --no-hostname --no-pager --boot=0 --lines=100 --dmesg
+    echo "::endgroup::"
+  fi
+
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "==> Skipping cleanup (GitHub Action runner detected)"
   else
     echo "==> Cleaning up"
 
     umount -l "${TEST_DIR}/dev"
-    kill_external_auth_daemon "$TEST_DIR"
     cleanup_lxds "$TEST_DIR"
   fi
 
@@ -137,8 +143,6 @@ chmod +x "${LXD_DIR}"
 spawn_lxd "${LXD_DIR}" true
 LXD_ADDR=$(cat "${LXD_DIR}/lxd.addr")
 export LXD_ADDR
-
-start_external_auth_daemon "${LXD_DIR}"
 
 run_test() {
   TEST_CURRENT=${1}
@@ -202,8 +206,11 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_database_no_disk_space "database out of disk space"
     run_test test_sql "lxd sql"
     run_test test_tls_restrictions "TLS restrictions"
+    run_test test_oidc "OpenID Connect"
+    run_test test_authorization "Authorization"
     run_test test_certificate_edit "Certificate edit"
     run_test test_basic_usage "basic usage"
+    run_test test_server_info "server info"
     run_test test_remote_url "remote url handling"
     run_test test_remote_admin "remote administration"
     run_test test_remote_usage "remote usage"
@@ -278,6 +285,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_container_devices_unix_char "container devices - unix-char"
     run_test test_container_devices_unix_block "container devices - unix-block"
     run_test test_container_devices_tpm "container devices - tpm"
+    run_test test_container_move "container server-side move"
     run_test test_container_syscall_interception "container syscall interception"
     run_test test_security "security features"
     run_test test_security_protection "container protection"
@@ -290,6 +298,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_image_acl "image acl"
     run_test test_cloud_init "cloud-init"
     run_test test_exec "exec"
+    run_test test_exec_exit_code "exec exit code"
     run_test test_concurrent_exec "concurrent exec"
     run_test test_concurrent "concurrent startup"
     run_test test_snapshots "container snapshots"
@@ -336,7 +345,6 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_storage_volume_initial_config "storage volume initial configuration"
     run_test test_resources "resources"
     run_test test_kernel_limits "kernel limits"
-    run_test test_macaroon_auth "macaroon authentication"
     run_test test_console "console"
     run_test test_query "query"
     run_test test_storage_local_volume_handling "storage local volume handling"
@@ -344,6 +352,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_backup_export "backup export"
     run_test test_backup_rename "backup rename"
     run_test test_backup_volume_export "backup volume export"
+    run_test test_backup_export_import_instance_only "backup export and import instance only"
     run_test test_backup_volume_rename_delete "backup volume rename and delete"
     run_test test_backup_different_instance_uuid "backup instance and check instance UUIDs"
     run_test test_backup_volume_expiry "backup volume expiry"
@@ -359,6 +368,7 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_metrics "Metrics"
     run_test test_storage_volume_recover "Recover storage volumes"
     run_test test_syslog_socket "Syslog socket"
+    run_test test_lxd_user "lxd user"
 fi
 
 # shellcheck disable=SC2034

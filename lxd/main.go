@@ -2,9 +2,8 @@ package main
 
 import (
 	"bufio"
-	"math/rand"
+	"fmt"
 	"os"
-	"time"
 
 	"github.com/canonical/go-dqlite"
 	"github.com/spf13/cobra"
@@ -18,11 +17,6 @@ import (
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
-
-// Initialize the random number generator.
-func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
-}
 
 type cmdGlobal struct {
 	cmd *cobra.Command
@@ -111,6 +105,9 @@ func main() {
 	// Version handling
 	app.SetVersionTemplate("{{.Version}}\n")
 	app.Version = version.Version
+	if version.IsLTSVersion {
+		app.Version = fmt.Sprintf("%s LTS", version.Version)
+	}
 
 	// activateifneeded sub-command
 	activateifneededCmd := cmdActivateifneeded{global: &globalCmd}
@@ -147,6 +144,10 @@ func main() {
 	// forksyscall sub-command
 	forksyscallCmd := cmdForksyscall{global: &globalCmd}
 	app.AddCommand(forksyscallCmd.Command())
+
+	// forksyscallgo sub-command
+	forksyscallgoCmd := cmdForksyscallgo{global: &globalCmd}
+	app.AddCommand(forksyscallgoCmd.Command())
 
 	// forkcoresched sub-command
 	forkcoreschedCmd := cmdForkcoresched{global: &globalCmd}

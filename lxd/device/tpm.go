@@ -12,10 +12,10 @@ import (
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
-	"github.com/canonical/lxd/lxd/revert"
+	"github.com/canonical/lxd/lxd/subprocess"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
-	"github.com/canonical/lxd/shared/subprocess"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/validate"
 )
 
@@ -36,6 +36,21 @@ func (d *tpm) validateConfig(instConf instance.ConfigReader) error {
 
 	rules := map[string]func(string) error{}
 
+	// lxdmeta:generate(entities=device-tpm; group=device-conf; key=path)
+	// For example: `/dev/tpm0`
+	// ---
+	//  type: string
+	//  required: for containers
+	//  condition: containers
+	//  shortdesc: Path inside the container
+
+	// lxdmeta:generate(entities=device-tpm; group=device-conf; key=pathrm)
+	// For example: `/dev/tpmrm0`
+	// ---
+	//  type: string
+	//  required: for containers
+	//  condition: containers
+	//  shortdesc: Resource manager path inside the container
 	if instConf.Type() == instancetype.Container {
 		rules["path"] = validate.IsNotEmpty
 		rules["pathrm"] = validate.IsNotEmpty

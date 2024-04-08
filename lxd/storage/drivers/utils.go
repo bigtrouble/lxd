@@ -13,11 +13,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/idmap"
 	"github.com/canonical/lxd/shared/logger"
 )
 
@@ -640,7 +640,7 @@ func UnshiftBtrfsRootfs(path string, diskIdmap *idmap.IdmapSet) error {
 	return shiftBtrfsRootfs(path, diskIdmap, false)
 }
 
-// shiftBtrfsRootfs shiftfs a filesystem that main include read-only subvolumes.
+// shiftBtrfsRootfs shifts a filesystem that main include read-only subvolumes.
 func shiftBtrfsRootfs(path string, diskIdmap *idmap.IdmapSet, shift bool) error {
 	var err error
 	roSubvols := []string{}

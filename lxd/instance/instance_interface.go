@@ -16,12 +16,12 @@ import (
 	"github.com/canonical/lxd/lxd/cgroup"
 	"github.com/canonical/lxd/lxd/db"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/instance/operationlock"
 	"github.com/canonical/lxd/lxd/metrics"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/idmap"
 )
 
 // HookStart hook used when instance has started.
@@ -102,6 +102,7 @@ type Instance interface {
 	// Live configuration.
 	CGroup() (*cgroup.CGroup, error)
 	VolatileSet(changes map[string]string) error
+	SetAffinity(set []string) error
 
 	// File handling.
 	FileSFTPConn() (net.Conn, error)
@@ -187,6 +188,10 @@ type VM interface {
 	Instance
 
 	AgentCertificate() *x509.Certificate
+
+	// UEFI vars handling.
+	UEFIVars() (*api.InstanceUEFIVars, error)
+	UEFIVarsUpdate(newUEFIVarsSet api.InstanceUEFIVars) error
 }
 
 // CriuMigrationArgs arguments for CRIU migration.

@@ -9,12 +9,13 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/storage/filesystem"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/validate"
 	"github.com/canonical/lxd/shared/version"
@@ -88,20 +89,21 @@ func (d *btrfs) load() error {
 // Info returns info about the driver and its environment.
 func (d *btrfs) Info() Info {
 	return Info{
-		Name:                  "btrfs",
-		Version:               btrfsVersion,
-		OptimizedImages:       true,
-		OptimizedBackups:      true,
-		OptimizedBackupHeader: true,
-		PreservesInodes:       !d.state.OS.RunningInUserNS,
-		Remote:                d.isRemote(),
-		VolumeTypes:           []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
-		BlockBacking:          false,
-		RunningCopyFreeze:     false,
-		DirectIO:              true,
-		IOUring:               true,
-		MountedRoot:           true,
-		Buckets:               true,
+		Name:                         "btrfs",
+		Version:                      btrfsVersion,
+		DefaultVMBlockFilesystemSize: deviceConfig.DefaultVMBlockFilesystemSize,
+		OptimizedImages:              true,
+		OptimizedBackups:             true,
+		OptimizedBackupHeader:        true,
+		PreservesInodes:              !d.state.OS.RunningInUserNS,
+		Remote:                       d.isRemote(),
+		VolumeTypes:                  []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
+		BlockBacking:                 false,
+		RunningCopyFreeze:            false,
+		DirectIO:                     true,
+		IOUring:                      true,
+		MountedRoot:                  true,
+		Buckets:                      true,
 	}
 }
 
@@ -123,15 +125,27 @@ func (d *btrfs) FillConfig() error {
 		d.config["size"] = ""
 	}
 
+	// Store the provided source as we are likely to be mangling it.
+	d.config["volatile.initial_source"] = d.config["source"]
+
+	// Set the block device's UUID in case it already has one.
+	// This allows to recover the pools configuration without actually
+	// creating the storage pool.
+	// Downstream functions should use `volatile.initial_source` to ensure
+	// they are using the path instead of the volume's UUID.
+	if shared.IsBlockdevPath(d.config["source"]) {
+		devUUID, err := fsUUID(d.config["source"])
+		if err == nil {
+			d.config["source"] = devUUID
+		}
+	}
+
 	return nil
 }
 
 // Create is called during pool creation and is effectively using an empty driver struct.
 // WARNING: The Create() function cannot rely on any of the struct attributes being set.
 func (d *btrfs) Create() error {
-	// Store the provided source as we are likely to be mangling it.
-	d.config["volatile.initial_source"] = d.config["source"]
-
 	revert := revert.New()
 	defer revert.Fail()
 
@@ -163,30 +177,36 @@ func (d *btrfs) Create() error {
 		if err != nil {
 			return fmt.Errorf("Failed to format sparse file: %w", err)
 		}
-	} else if shared.IsBlockdevPath(d.config["source"]) {
+	} else if shared.IsBlockdevPath(d.config["volatile.initial_source"]) {
+		// Make sure to use the block volumes `volatile.initial_source` here
+		// as an earlier call to the drivers FillConfig() might have set
+		// the `source` property to the block volumes UUID in case it's not empty.
+
 		// Wipe if requested.
 		if shared.IsTrue(d.config["source.wipe"]) {
-			err := wipeBlockHeaders(d.config["source"])
+			err := wipeBlockHeaders(d.config["volatile.initial_source"])
 			if err != nil {
-				return fmt.Errorf("Failed to wipe headers from disk %q: %w", d.config["source"], err)
+				return fmt.Errorf("Failed to wipe headers from disk %q: %w", d.config["volatile.initial_source"], err)
 			}
 
 			d.config["source.wipe"] = ""
 		}
 
 		// Format the block device.
-		_, err := makeFSType(d.config["source"], "btrfs", &mkfsOptions{Label: d.name})
+		_, err := makeFSType(d.config["volatile.initial_source"], "btrfs", &mkfsOptions{Label: d.name})
 		if err != nil {
 			return fmt.Errorf("Failed to format block device: %w", err)
 		}
 
 		// Record the UUID as the source.
-		devUUID, err := fsUUID(d.config["source"])
+		devUUID, err := fsUUID(d.config["volatile.initial_source"])
 		if err != nil {
 			return err
 		}
 
 		// Confirm that the symlink is appearing (give it 10s).
+		// In case of timeout it falls back to using the volume's path
+		// instead of its UUID.
 		if tryExists(fmt.Sprintf("/dev/disk/by-uuid/%s", devUUID)) {
 			// Override the config to use the UUID.
 			d.config["source"] = devUUID
@@ -195,13 +215,13 @@ func (d *btrfs) Create() error {
 		hostPath := shared.HostPath(d.config["source"])
 		if d.isSubvolume(hostPath) {
 			// Existing btrfs subvolume.
-			subvols, err := d.getSubvolumes(hostPath)
+			hasSubvolumes, err := d.hasSubvolumes(hostPath)
 			if err != nil {
 				return fmt.Errorf("Could not determine if existing btrfs subvolume is empty: %w", err)
 			}
 
 			// Check that the provided subvolume is empty.
-			if len(subvols) > 0 {
+			if hasSubvolumes {
 				return fmt.Errorf("Requested btrfs subvolume exists but is not empty")
 			}
 		} else {
@@ -313,7 +333,13 @@ func (d *btrfs) Delete(op *operations.Operation) error {
 // Validate checks that all provide keys are supported and that no conflicting or missing configuration is present.
 func (d *btrfs) Validate(config map[string]string) error {
 	rules := map[string]func(value string) error{
-		"size":                validate.Optional(validate.IsSize),
+		"size": validate.Optional(validate.IsSize),
+		// lxdmeta:generate(entities=storage-btrfs; group=pool-conf; key=btrfs.mount_options)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `user_subvol_rm_allowed`
+		//  shortdesc: Mount options for block devices
 		"btrfs.mount_options": validate.IsAny,
 	}
 

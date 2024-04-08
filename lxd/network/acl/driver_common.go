@@ -2,6 +2,7 @@ package acl
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -15,13 +16,12 @@ import (
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/network/openvswitch"
-	"github.com/canonical/lxd/lxd/project"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/validate"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -122,32 +122,32 @@ func (d *common) usedBy(firstOnly bool) ([]string, error) {
 	usedBy := []string{}
 
 	// Find all networks, profiles and instance NICs that use this Network ACL.
-	err := UsedBy(d.state, d.projectName, func(_ []string, usageType any, _ string, _ map[string]string) error {
+	err := UsedBy(d.state, d.projectName, func(ctx context.Context, tx *db.ClusterTx, _ []string, usageType any, _ string, _ map[string]string) error {
 		switch u := usageType.(type) {
 		case db.InstanceArgs:
 			uri := fmt.Sprintf("/%s/instances/%s", version.APIVersion, u.Name)
-			if u.Project != project.Default {
+			if u.Project != api.ProjectDefaultName {
 				uri += fmt.Sprintf("?project=%s", u.Project)
 			}
 
 			usedBy = append(usedBy, uri)
 		case *api.Network:
 			uri := fmt.Sprintf("/%s/networks/%s", version.APIVersion, u.Name)
-			if d.projectName != project.Default {
+			if d.projectName != api.ProjectDefaultName {
 				uri += fmt.Sprintf("?project=%s", d.projectName)
 			}
 
 			usedBy = append(usedBy, uri)
 		case dbCluster.Profile:
 			uri := fmt.Sprintf("/%s/profiles/%s", version.APIVersion, u.Name)
-			if u.Project != project.Default {
+			if u.Project != api.ProjectDefaultName {
 				uri += fmt.Sprintf("?project=%s", u.Project)
 			}
 
 			usedBy = append(usedBy, uri)
 		case *api.NetworkACL:
 			uri := fmt.Sprintf("/%s/network-acls/%s", version.APIVersion, u.Name)
-			if d.projectName != project.Default {
+			if d.projectName != api.ProjectDefaultName {
 				uri += fmt.Sprintf("?project=%s", d.projectName)
 			}
 
@@ -261,7 +261,7 @@ func (d *common) validateConfigMap(config map[string]string, rules map[string]fu
 
 	// Run the validator against each field.
 	for k, validator := range rules {
-		checkedFields[k] = struct{}{} //Mark field as checked.
+		checkedFields[k] = struct{}{} // Mark field as checked.
 		err := validator(config[k])
 		if err != nil {
 			return fmt.Errorf("Invalid value for config option %q: %w", k, err)
@@ -299,8 +299,16 @@ func (d *common) validateRule(direction ruleDirection, rule api.NetworkACLRule) 
 		return fmt.Errorf("State must be one of: %s", strings.Join(validStates, ", "))
 	}
 
-	// Get map of ACL names to DB IDs (used for generating OVN port group names).
-	acls, err := d.state.DB.Cluster.GetNetworkACLIDsByNames(d.Project())
+	var acls map[string]int64
+
+	err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		// Get map of ACL names to DB IDs (used for generating OVN port group names).
+		acls, err = tx.GetNetworkACLIDsByNames(ctx, d.Project())
+
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Failed getting network ACLs for security ACL subject validation: %w", err)
 	}
@@ -441,7 +449,7 @@ func (d *common) validateRule(direction ruleDirection, rule api.NetworkACLRule) 
 // validateRuleSubjects checks that the source or destination subjects for a rule are valid.
 // Accepts a validSubjectNames list of valid ACL or special classifier names.
 // Returns whether the subjects include names, IPv4 and IPv6 addresses respectively.
-func (d *common) validateRuleSubjects(fieldName string, direction ruleDirection, subjects []string, validSubjectNames []string) (bool, bool, bool, error) {
+func (d *common) validateRuleSubjects(fieldName string, direction ruleDirection, subjects []string, validSubjectNames []string) (hasName bool, hasIPv4 bool, hasIPv6 bool, err error) {
 	// Check if named subjects are allowed in field/direction combination.
 	allowSubjectNames := false
 	if (fieldName == "Source" && direction == ruleDirectionIngress) || (fieldName == "Destination" && direction == ruleDirectionEgress) {
@@ -535,10 +543,6 @@ func (d *common) validateRuleSubjects(fieldName string, direction ruleDirection,
 		return 0, fmt.Errorf("Invalid subject %q", subject)
 	}
 
-	hasIPv4 := false
-	hasIPv6 := false
-	hasName := false
-
 	for _, s := range subjects {
 		ipVersion, err := validSubject(s)
 		if err != nil {
@@ -581,22 +585,27 @@ func (d *common) Update(config *api.NetworkACLPut, clientType request.ClientType
 	defer revert.Fail()
 
 	if clientType == request.ClientTypeNormal {
-		oldConfig := d.info.NetworkACLPut
+		oldConfig := d.info.Writable()
 
-		// Update database. Its important this occurs before we attempt to apply to networks using the ACL
-		// as usage functions will inspect the database.
-		err = d.state.DB.Cluster.UpdateNetworkACL(d.id, config)
+		err = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Update database. Its important this occurs before we attempt to apply to networks using the ACL
+			// as usage functions will inspect the database.
+			return tx.UpdateNetworkACL(ctx, d.id, *config)
+		})
 		if err != nil {
 			return err
 		}
 
 		// Apply changes internally and reinitialise.
-		d.info.NetworkACLPut = *config
+		d.info.SetWritable(*config)
 		d.init(d.state, d.id, d.projectName, d.info)
 
 		revert.Add(func() {
-			_ = d.state.DB.Cluster.UpdateNetworkACL(d.id, &oldConfig)
-			d.info.NetworkACLPut = oldConfig
+			_ = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				return tx.UpdateNetworkACL(ctx, d.id, oldConfig)
+			})
+
+			d.info.SetWritable(oldConfig)
 			d.init(d.state, d.id, d.projectName, d.info)
 		})
 	}
@@ -636,8 +645,14 @@ func (d *common) Update(config *api.NetworkACLPut, clientType request.ClientType
 			return fmt.Errorf("Failed to get OVN client: %w", err)
 		}
 
-		// Get map of ACL names to DB IDs (used for generating OVN port group names).
-		aclNameIDs, err := d.state.DB.Cluster.GetNetworkACLIDsByNames(d.Project())
+		var aclNameIDs map[string]int64
+
+		err = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			// Get map of ACL names to DB IDs (used for generating OVN port group names).
+			aclNameIDs, err = tx.GetNetworkACLIDsByNames(ctx, d.Project())
+
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("Failed getting network ACL IDs for security ACL update: %w", err)
 		}
@@ -672,7 +687,7 @@ func (d *common) Update(config *api.NetworkACLPut, clientType request.ClientType
 		}
 
 		err = notifier(func(client lxd.InstanceServer) error {
-			return client.UseProject(d.projectName).UpdateNetworkACL(d.info.Name, d.info.NetworkACLPut, "")
+			return client.UseProject(d.projectName).UpdateNetworkACL(d.info.Name, d.info.Writable(), "")
 		})
 		if err != nil {
 			return err
@@ -704,7 +719,9 @@ func (d *common) Rename(newName string) error {
 		return err
 	}
 
-	err = d.state.DB.Cluster.RenameNetworkACL(d.id, newName)
+	err = d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.RenameNetworkACL(ctx, d.id, newName)
+	})
 	if err != nil {
 		return err
 	}
@@ -726,7 +743,9 @@ func (d *common) Delete() error {
 		return fmt.Errorf("Cannot delete an ACL that is in use")
 	}
 
-	return d.state.DB.Cluster.DeleteNetworkACL(d.id)
+	return d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.DeleteNetworkACL(ctx, d.id)
+	})
 }
 
 // GetLog gets the ACL log.

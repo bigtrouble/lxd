@@ -1,35 +1,58 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/network"
-	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/state"
+	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
 )
 
 var networkOVNChassis *bool
 
 func networkAutoAttach(cluster *db.Cluster, devName string) error {
-	_, dbInfo, err := cluster.GetNetworkWithInterface(devName)
-	if err != nil {
-		// No match found, move on
+	var networkName string
+	_ = cluster.Transaction(context.TODO(), func(ctx context.Context, c *db.ClusterTx) error {
+		_, dbInfo, err := c.GetNetworkWithInterface(ctx, devName)
+		if err != nil {
+			if !api.StatusErrorCheck(err, http.StatusNotFound) {
+				return fmt.Errorf("Failed finding network matching interface %q: %w", devName, err)
+			}
+
+			return nil // No match found, move on.
+		}
+
+		networkName = dbInfo.Name
 		return nil
+	})
+
+	if networkName != "" {
+		return network.AttachInterface(networkName, devName)
 	}
 
-	return network.AttachInterface(dbInfo.Name, devName)
+	return nil
 }
 
 // networkUpdateForkdnsServersTask runs every 30s and refreshes the forkdns servers list.
 func networkUpdateForkdnsServersTask(s *state.State, heartbeatData *cluster.APIHeartbeat) error {
 	logger.Debug("Refreshing forkdns servers")
 
-	// Use project.Default here as forkdns (fan bridge) networks don't support projects.
-	projectName := project.Default
+	// Use api.ProjectDefaultName here as forkdns (fan bridge) networks don't support projects.
+	projectName := api.ProjectDefaultName
 
 	// Get a list of managed networks
-	networks, err := s.DB.Cluster.GetCreatedNetworks(projectName)
+	var networks []string
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, c *db.ClusterTx) error {
+		var err error
+		networks, err = c.GetCreatedNetworkNamesByProject(ctx, projectName)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}

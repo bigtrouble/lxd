@@ -25,6 +25,7 @@ import (
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/operations"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
@@ -53,6 +54,7 @@ type execWs struct {
 	s                     *state.State
 }
 
+// Metadata returns a map of metadata.
 func (s *execWs) Metadata() any {
 	fds := shared.Jmap{}
 	for fd, secret := range s.fds {
@@ -71,6 +73,7 @@ func (s *execWs) Metadata() any {
 	}
 }
 
+// Connect connects to the websocket.
 func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.ResponseWriter) error {
 	secret := r.FormValue("secret")
 	if secret == "" {
@@ -85,7 +88,6 @@ func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.Respo
 			}
 
 			s.connsLock.Lock()
-			defer s.connsLock.Unlock()
 
 			val, found := s.conns[fd]
 			if found && val == nil {
@@ -132,17 +134,19 @@ func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.Respo
 					}
 
 					if c == nil {
+						s.connsLock.Unlock()
 						return nil // Not all required connections connected yet.
 					}
 				}
 
 				s.waitRequiredConnected.Cancel() // All required connections now connected.
+				s.connsLock.Unlock()
 				return nil
 			} else if !found {
 				return fmt.Errorf("Unknown websocket number")
-			} else {
-				return fmt.Errorf("Websocket number already connected")
 			}
+
+			return fmt.Errorf("Websocket number already connected")
 		}
 	}
 
@@ -151,6 +155,7 @@ func (s *execWs) Connect(op *operations.Operation, r *http.Request, w http.Respo
 	return os.ErrPermission
 }
 
+// Do connects to the websocket and executes the operation.
 func (s *execWs) Do(op *operations.Operation) error {
 	// Once this function ends ensure that any connected websockets are closed.
 	defer func() {
@@ -168,7 +173,6 @@ func (s *execWs) Do(op *operations.Operation) error {
 	logger.Debug("Waiting for exec websockets to connect")
 	select {
 	case <-s.waitRequiredConnected.Done():
-		break
 	case <-time.After(time.Second * 5):
 		return fmt.Errorf("Timed out waiting for websockets to connect")
 	}
@@ -190,7 +194,11 @@ func (s *execWs) Do(op *operations.Operation) error {
 			var rootUID, rootGID int64
 			var devptsFd *os.File
 
-			c := s.instance.(instance.Container)
+			c, ok := s.instance.(instance.Container)
+			if !ok {
+				return fmt.Errorf("Invalid instance type")
+			}
+
 			idmapset, err := c.CurrentIdmap()
 			if err != nil {
 				return err
@@ -250,13 +258,13 @@ func (s *execWs) Do(op *operations.Operation) error {
 		stderr = ttys[execWSStderr]
 	}
 
-	waitAttachedChildIsDead := cancel.New(context.Background())
+	waitAttachedChildIsDead, markAttachedChildIsDead := context.WithCancel(context.Background())
 	var wgEOF sync.WaitGroup
 
 	// Define a function to clean up TTYs and sockets when done.
 	finisher := func(cmdResult int, cmdErr error) error {
-		// Close this before closing the control connection so control handler can detect command ending.
-		waitAttachedChildIsDead.Cancel()
+		// Cancel this before closing the control connection so control handler can detect command ending.
+		markAttachedChildIsDead()
 
 		for _, tty := range ttys {
 			_ = tty.Close()
@@ -402,33 +410,39 @@ func (s *execWs) Do(op *operations.Operation) error {
 		go func() {
 			defer wgEOF.Done()
 
+			var readErr, writeErr error
 			l.Debug("Exec mirror websocket started", logger.Ctx{"number": 0})
-			defer l.Debug("Exec mirror websocket finished", logger.Ctx{"number": 0})
+			defer func() {
+				l.Debug("Exec mirror websocket finished", logger.Ctx{"number": 0, "readErr": readErr, "writeErr": writeErr})
+			}()
 
 			s.connsLock.Lock()
 			conn := s.conns[0]
 			s.connsLock.Unlock()
 
-			var readDone, writeDone chan struct{}
+			var readDone, writeDone chan error
 			if s.instance.Type() == instancetype.Container {
 				// For containers, we are running the command via the local LXD managed PTY and so
 				// need to use the same PTY handle for both read and write.
-				readDone, writeDone = ws.Mirror(context.Background(), conn, ptys[0])
+				readDone, writeDone = ws.Mirror(conn, shared.NewExecWrapper(waitAttachedChildIsDead, ptys[0]))
 			} else {
-				readDone = ws.MirrorRead(context.Background(), conn, ptys[execWSStdout])
-				writeDone = ws.MirrorWrite(context.Background(), conn, ttys[execWSStdin])
+				readDone = ws.MirrorRead(conn, ptys[execWSStdout])
+				writeDone = ws.MirrorWrite(conn, ttys[execWSStdin])
 			}
 
-			<-readDone
-			<-writeDone
+			readErr = <-readDone
+			writeErr = <-writeDone
 			_ = conn.Close()
 		}()
 	} else {
 		wgEOF.Add(len(ttys) - 1)
 		for i := 0; i < len(ttys); i++ {
 			go func(i int) {
+				var err error
 				l.Debug("Exec mirror websocket started", logger.Ctx{"number": i})
-				defer l.Debug("Exec mirror websocket finished", logger.Ctx{"number": i})
+				defer func() {
+					l.Debug("Exec mirror websocket finished", logger.Ctx{"number": i, "err": err})
+				}()
 
 				s.connsLock.Lock()
 				conn := s.conns[i]
@@ -458,10 +472,10 @@ func (s *execWs) Do(op *operations.Operation) error {
 				}
 
 				if i == execWSStdin {
-					<-ws.MirrorWrite(context.Background(), conn, ttys[i])
+					err = <-ws.MirrorWrite(conn, ttys[i])
 					_ = ttys[i].Close()
 				} else {
-					<-ws.MirrorRead(context.Background(), conn, ptys[i])
+					err = <-ws.MirrorRead(conn, shared.NewExecWrapper(waitAttachedChildIsDead, ptys[i]))
 					_ = ptys[i].Close()
 					wgEOF.Done()
 				}
@@ -521,7 +535,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -552,7 +566,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Forward the request if the container is remote.
-	client, err := cluster.ConnectIfInstanceIsRemote(s.DB.Cluster, projectName, name, s.Endpoints.NetworkCert(), s.ServerCert(), r, instanceType)
+	client, err := cluster.ConnectIfInstanceIsRemote(s, projectName, name, r, instanceType)
 	if err != nil {
 		return response.SmartError(err)
 	}

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/canonical/lxd/lxd/db"
-	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/lxd/db/warningtype"
 	"github.com/canonical/lxd/lxd/response"
@@ -20,6 +19,7 @@ import (
 	"github.com/canonical/lxd/lxd/warnings"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 )
 
@@ -178,7 +178,7 @@ func (hbState *APIHeartbeat) Send(ctx context.Context, networkCert *shared.CertI
 			heartbeatData.Unlock()
 			logger.Debug("Successful heartbeat", logger.Ctx{"remote": address})
 
-			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(hbState.cluster, "", warningtype.OfflineClusterMember, cluster.TypeNode, int(nodeID))
+			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(hbState.cluster, "", warningtype.OfflineClusterMember, entity.TypeNode, int(nodeID))
 			if err != nil {
 				logger.Warn("Failed to resolve warning", logger.Ctx{"err": err})
 			}
@@ -186,7 +186,9 @@ func (hbState *APIHeartbeat) Send(ctx context.Context, networkCert *shared.CertI
 			logger.Warn("Failed heartbeat", logger.Ctx{"remote": address, "err": err})
 
 			if ctx.Err() == nil {
-				err = hbState.cluster.UpsertWarningLocalNode("", cluster.TypeNode, int(nodeID), warningtype.OfflineClusterMember, err.Error())
+				err = hbState.cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+					return tx.UpsertWarningLocalNode(ctx, "", entity.TypeNode, int(nodeID), warningtype.OfflineClusterMember, err.Error())
+				})
 				if err != nil {
 					logger.Warn("Failed to create warning", logger.Ctx{"err": err})
 				}
@@ -452,7 +454,7 @@ func (g *Gateway) heartbeat(ctx context.Context, mode heartbeatMode) {
 	// Initialise slice to indicate to HeartbeatNodeHook that its being called from leader.
 	unavailableMembers := make([]string, 0)
 
-	err = query.Retry(func() error {
+	err = query.Retry(ctx, func(ctx context.Context) error {
 		// Durating cluster member fluctuations/upgrades the cluster can become unavailable so check here.
 		if g.Cluster == nil {
 			return fmt.Errorf("Cluster unavailable")

@@ -19,6 +19,7 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
@@ -129,7 +130,7 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	cname, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -154,14 +155,22 @@ func instanceSnapshotsGet(d *Daemon, r *http.Request) response.Response {
 	resultMap := []*api.InstanceSnapshot{}
 
 	if !recursion {
-		snaps, err := s.DB.Cluster.GetInstanceSnapshotsNames(projectName, cname)
+		var snaps []string
+
+		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var err error
+
+			snaps, err = tx.GetInstanceSnapshotsNames(ctx, projectName, cname)
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(err)
 		}
 
 		for _, snap := range snaps {
 			_, snapName, _ := api.GetParentAndSnapshotName(snap)
-			if projectName == project.Default {
+			if projectName == api.ProjectDefaultName {
 				url := fmt.Sprintf("/%s/instances/%s/snapshots/%s", version.APIVersion, cname, snapName)
 				resultString = append(resultString, url)
 			} else {
@@ -237,7 +246,7 @@ func instanceSnapshotsPost(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -348,7 +357,7 @@ func instanceSnapshotHandler(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	instName, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -722,10 +731,17 @@ func snapshotPost(s *state.State, r *http.Request, snapInst instance.Instance) r
 
 	fullName := parentName + shared.SnapshotDelimiter + newName
 
-	// Check that the name isn't already in use
-	id, _ := s.DB.Cluster.GetInstanceSnapshotID(snapInst.Project().Name, parentName, newName)
-	if id > 0 {
-		return response.Conflict(fmt.Errorf("Name '%s' already in use", fullName))
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check that the name isn't already in use
+		id, _ := tx.GetInstanceSnapshotID(ctx, snapInst.Project().Name, parentName, newName)
+		if id > 0 {
+			return fmt.Errorf("Name '%s' already in use", fullName)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return response.Conflict(err)
 	}
 
 	rename := func(op *operations.Operation) error {

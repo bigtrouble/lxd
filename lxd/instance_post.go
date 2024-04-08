@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
@@ -19,6 +21,7 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/scriptlet"
 	"github.com/canonical/lxd/lxd/state"
@@ -26,6 +29,7 @@ import (
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	apiScriptlet "github.com/canonical/lxd/shared/api/scriptlet"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -78,7 +82,7 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
@@ -89,21 +93,15 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Invalid instance name"))
 	}
 
-	// Flag indicating whether the node running the container is offline.
+	// Flag indicating whether the node running the instance is offline.
 	sourceNodeOffline := false
-
-	// Check if clustered.
-	clustered, err := cluster.Enabled(s.DB.Node)
-	if err != nil {
-		return response.InternalError(fmt.Errorf("Failed checking cluster state: %w", err))
-	}
 
 	var targetProject *api.Project
 	var targetMemberInfo *db.NodeInfo
 	var candidateMembers []db.NodeInfo
 
-	target := queryParam(r, "target")
-	if !clustered && target != "" {
+	target := request.QueryParam(r, "target")
+	if !s.ServerClustered && target != "" {
 		return response.BadRequest(fmt.Errorf("Target only allowed when clustered"))
 	}
 
@@ -171,7 +169,7 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 	// Cases 1. and 2. are the ones for which the conditional will be true
 	// and we'll either forward the request or load the instance.
 	if target == "" || !sourceNodeOffline {
-		// Handle requests targeted to a container on a different node.
+		// Handle requests targeted to an instance on a different node.
 		resp, err := forwardedResponseIfInstanceIsRemote(s, r, projectName, name, instanceType)
 		if err != nil {
 			return response.SmartError(err)
@@ -194,7 +192,7 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Run the cluster placement after potentially forwarding the request to another member.
-	if target != "" && clustered {
+	if target != "" && s.ServerClustered {
 		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
 			p, err := dbCluster.GetProject(ctx, tx.Tx(), projectName)
 			if err != nil {
@@ -322,33 +320,19 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if req.Migration {
-		// Server-side pool migration.
-		if req.Pool != "" {
-			// Setup the instance move operation.
-			run := func(op *operations.Operation) error {
-				return instancePostPoolMigration(s, inst, req.Name, req.InstanceOnly, req.Pool, req.Live, req.AllowInconsistent, op)
-			}
-
-			resources := map[string][]api.URL{}
-			resources["instances"] = []api.URL{*api.NewURL().Path(version.APIVersion, "instances", name)}
-			op, err := operations.OperationCreate(s, projectName, operations.OperationClassTask, operationtype.InstanceMigrate, resources, nil, run, nil, nil, r)
-			if err != nil {
-				return response.InternalError(err)
-			}
-
-			return operations.OperationResponse(op)
-		}
-
-		// Server-side project migration.
-		if req.Project != "" {
-			// Check if user has access to target project
-			if !s.Authorizer.UserHasPermission(r, req.Project, "manage-containers") {
-				return response.Forbidden(nil)
+		// Server-side instance migration.
+		if req.Pool != "" || req.Project != "" {
+			// Check if user has access to target project.
+			if req.Project != "" {
+				err := s.Authorizer.CheckPermission(r.Context(), r, entity.ProjectURL(req.Project), auth.EntitlementCanCreateInstances)
+				if err != nil {
+					return response.SmartError(err)
+				}
 			}
 
 			// Setup the instance move operation.
 			run := func(op *operations.Operation) error {
-				return instancePostProjectMigration(s, inst, req.Name, req.Project, req.InstanceOnly, req.Live, req.AllowInconsistent, op)
+				return instancePostMigration(s, inst, req.Name, req.Pool, req.Project, req.Config, req.Devices, req.Profiles, req.InstanceOnly, req.Live, req.AllowInconsistent, op)
 			}
 
 			resources := map[string][]api.URL{}
@@ -362,8 +346,13 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 		}
 
 		if targetMemberInfo != nil {
+			var backups []string
+
 			// Check if instance has backups.
-			backups, err := s.DB.Cluster.GetInstanceBackups(projectName, name)
+			err := s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+				backups, err = tx.GetInstanceBackups(ctx, projectName, name)
+				return err
+			})
 			if err != nil {
 				err = fmt.Errorf("Failed to fetch instance's backups: %w", err)
 				return response.SmartError(err)
@@ -433,8 +422,14 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 		return operations.OperationResponse(op)
 	}
 
-	// Check that the name isn't already in use.
-	id, _ := s.DB.Cluster.GetInstanceID(projectName, req.Name)
+	var id int
+
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check that the name isn't already in use.
+		id, _ = tx.GetInstanceID(ctx, projectName, req.Name)
+
+		return nil
+	})
 	if id > 0 {
 		return response.Conflict(fmt.Errorf("Name %q already in use", req.Name))
 	}
@@ -458,22 +453,26 @@ func instancePost(d *Daemon, r *http.Request) response.Response {
 	return operations.OperationResponse(op)
 }
 
-// Move an instance to another pool.
-func instancePostPoolMigration(s *state.State, inst instance.Instance, newName string, instanceOnly bool, newPool string, stateful bool, allowInconsistent bool, op *operations.Operation) error {
+// Move an instance.
+func instancePostMigration(s *state.State, inst instance.Instance, newName string, newPool string, newProject string, config map[string]string, devices map[string]map[string]string, profiles []string, instanceOnly bool, stateful bool, allowInconsistent bool, op *operations.Operation) error {
 	if inst.IsSnapshot() {
 		return fmt.Errorf("Instance snapshots cannot be moved between pools")
 	}
 
+	if newProject == "" {
+		newProject = inst.Project().Name
+	}
+
 	statefulStart := false
 	if inst.IsRunning() {
-		if stateful {
-			statefulStart = true
-			err := inst.Stop(true)
-			if err != nil {
-				return err
-			}
-		} else {
+		if !stateful {
 			return api.StatusErrorf(http.StatusBadRequest, "Instance must be stopped to move between pools statelessly")
+		}
+
+		statefulStart = true
+		err := inst.Stop(true)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -483,29 +482,104 @@ func instancePostPoolMigration(s *state.State, inst instance.Instance, newName s
 		localConfig[k] = v
 	}
 
-	// Load source root disk from expanded devices (in case instance doesn't have its own root disk).
-	rootDevKey, rootDev, err := shared.GetRootDiskDevice(inst.ExpandedDevices().CloneNative())
-	if err != nil {
-		return err
+	// Set user defined configuration entries.
+	for k, v := range config {
+		localConfig[k] = v
 	}
 
-	// Copy device config from instance, and update target instance root disk device with the new pool name.
+	// Get instance local devices and then set user defined devices.
 	localDevices := inst.LocalDevices().Clone()
-	rootDev["pool"] = newPool
-	localDevices[rootDevKey] = rootDev
+	for devName, dev := range devices {
+		localDevices[devName] = dev
+	}
 
-	// Specify the target instance config with the new name and modified root disk config.
+	// Apply previous profiles, if provided profiles are nil.
+	if profiles == nil {
+		profiles = make([]string, 0, len(inst.Profiles()))
+		for _, p := range inst.Profiles() {
+			profiles = append(profiles, p.Name)
+		}
+	}
+
+	apiProfiles := []api.Profile{}
+	if len(profiles) > 0 {
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			profiles, err := dbCluster.GetProfilesIfEnabled(ctx, tx.Tx(), newProject, profiles)
+			if err != nil {
+				return err
+			}
+
+			apiProfiles = make([]api.Profile, 0, len(profiles))
+			for _, profile := range profiles {
+				apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+				if err != nil {
+					return err
+				}
+
+				apiProfiles = append(apiProfiles, *apiProfile)
+			}
+
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	// Check if root disk device is present in the instance config. If instance config has no
+	// root disk device configured, check if the same root disk device will be applied with new
+	// profiles in the target project. If the new root disk device differs from the existing
+	// one, add the existing one as a local device to the instance (we don't want to move root
+	// disk device if not necessary, as this is an expensive operation).
+	rootDevKey, rootDev, err := instancetype.GetRootDiskDevice(localDevices.CloneNative())
+	if err != nil && !errors.Is(err, instancetype.ErrNoRootDisk) {
+		return err
+	} else if errors.Is(err, instancetype.ErrNoRootDisk) {
+		// Find currently applied root disk device from expanded devices.
+		rootDevKey, rootDev, err = instancetype.GetRootDiskDevice(inst.ExpandedDevices().CloneNative())
+		if err != nil {
+			return err
+		}
+
+		// Iterate over profiles that will be applied in the target project and find
+		// the new root disk device. Iterate in reverse order to respect profile
+		// precedence.
+		var profileRootDev map[string]string
+		for i := len(apiProfiles) - 1; i >= 0; i-- {
+			_, profileRootDev, err = instancetype.GetRootDiskDevice(apiProfiles[i].Devices)
+			if err == nil {
+				break
+			}
+		}
+
+		// If current root disk device would be replaced according to the new profiles,
+		// add current root disk device to local instance devices (to retain it).
+		if profileRootDev == nil ||
+			profileRootDev["pool"] != rootDev["pool"] ||
+			profileRootDev["size"] != rootDev["size"] ||
+			profileRootDev["size.state"] != rootDev["size.state"] {
+			localDevices[rootDevKey] = rootDev
+		}
+	}
+
+	// Set specific storage pool for the instance, if provided.
+	if newPool != "" {
+		rootDev["pool"] = newPool
+		localDevices[rootDevKey] = rootDev
+	}
+
+	// Specify the target instance config with the new name.
 	args := db.InstanceArgs{
 		Name:         newName,
 		BaseImage:    localConfig["volatile.base_image"],
 		Config:       localConfig,
 		Devices:      localDevices,
-		Project:      inst.Project().Name,
+		Profiles:     apiProfiles,
+		Project:      newProject,
 		Type:         inst.Type(),
 		Architecture: inst.Architecture(),
 		Description:  inst.Description(),
 		Ephemeral:    inst.IsEphemeral(),
-		Profiles:     inst.Profiles(),
 		Stateful:     inst.IsStateful(),
 	}
 
@@ -513,7 +587,7 @@ func instancePostPoolMigration(s *state.State, inst instance.Instance, newName s
 	// the copy of the instance on the new pool with a temporary name that is different from the source to
 	// avoid conflicts. Then after the source instance has been deleted we will rename the new instance back
 	// to the original name.
-	if newName == inst.Name() {
+	if newName == inst.Name() && newProject == inst.Project().Name {
 		args.Name, err = instance.MoveTemporaryName(inst)
 		if err != nil {
 			return err
@@ -539,7 +613,7 @@ func instancePostPoolMigration(s *state.State, inst instance.Instance, newName s
 	}
 
 	// Rename copy from temporary name to original name if needed.
-	if newName == inst.Name() {
+	if newName == inst.Name() && newProject == inst.Project().Name {
 		err = targetInst.Rename(newName, false) // Don't apply templates when moving.
 		if err != nil {
 			return err
@@ -556,77 +630,7 @@ func instancePostPoolMigration(s *state.State, inst instance.Instance, newName s
 	return nil
 }
 
-// Move an instance to another project.
-func instancePostProjectMigration(s *state.State, inst instance.Instance, newName string, newProject string, instanceOnly bool, stateful bool, allowInconsistent bool, op *operations.Operation) error {
-	localConfig := inst.LocalConfig()
-
-	statefulStart := false
-	if inst.IsRunning() {
-		if stateful {
-			statefulStart = true
-			err := inst.Stop(true)
-			if err != nil {
-				return err
-			}
-		} else {
-			return api.StatusErrorf(http.StatusBadRequest, "Instance must be stopped to move between projects statelessly")
-		}
-	}
-
-	// Load source root disk from expanded devices (in case instance doesn't have its own root disk).
-	rootDevKey, rootDev, err := shared.GetRootDiskDevice(inst.ExpandedDevices().CloneNative())
-	if err != nil {
-		return err
-	}
-
-	// Copy device config from instance
-	localDevices := inst.LocalDevices().Clone()
-	localDevices[rootDevKey] = rootDev
-
-	// Specify the target instance config with the new name.
-	args := db.InstanceArgs{
-		Name:         newName,
-		BaseImage:    localConfig["volatile.base_image"],
-		Config:       localConfig,
-		Devices:      localDevices,
-		Project:      newProject,
-		Type:         inst.Type(),
-		Architecture: inst.Architecture(),
-		Description:  inst.Description(),
-		Ephemeral:    inst.IsEphemeral(),
-		Profiles:     inst.Profiles(),
-		Stateful:     inst.IsStateful(),
-	}
-
-	// Copy instance to new target instance.
-	targetInst, err := instanceCreateAsCopy(s, instanceCreateAsCopyOpts{
-		sourceInstance:       inst,
-		targetInstance:       args,
-		instanceOnly:         instanceOnly,
-		applyTemplateTrigger: false, // Don't apply templates when moving.
-		allowInconsistent:    allowInconsistent,
-	}, op)
-	if err != nil {
-		return err
-	}
-
-	// Delete original instance.
-	err = inst.Delete(true)
-	if err != nil {
-		return err
-	}
-
-	if statefulStart {
-		err = targetInst.Start(true)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// Move a non-ceph container to another cluster node.
+// Move a non-ceph instance to another cluster node. Source and target members must be online.
 func instancePostClusteringMigrate(s *state.State, r *http.Request, srcPool storagePools.Pool, srcInst instance.Instance, newInstName string, srcMember db.NodeInfo, newMember db.NodeInfo, stateful bool, allowInconsistent bool) (func(op *operations.Operation) error, error) {
 	srcMemberOffline := srcMember.IsOffline(s.GlobalConfig.OfflineThreshold())
 
@@ -637,7 +641,7 @@ func instancePostClusteringMigrate(s *state.State, r *http.Request, srcPool stor
 	}
 
 	// Save the original value of the "volatile.apply_template" config key,
-	// since we'll want to preserve it in the copied container.
+	// since we'll want to preserve it in the copied instance.
 	origVolatileApplyTemplate := srcInst.LocalConfig()["volatile.apply_template"]
 
 	// Check we can convert the instance to the volume types needed.
@@ -799,7 +803,7 @@ func instancePostClusteringMigrate(s *state.State, r *http.Request, srcPool stor
 				return fmt.Errorf("Failed to get ID of moved instance: %w", err)
 			}
 
-			err = tx.DeleteInstanceConfigKey(id, "volatile.apply_template")
+			err = tx.DeleteInstanceConfigKey(ctx, id, "volatile.apply_template")
 			if err != nil {
 				return fmt.Errorf("Failed to remove volatile.apply_template config key: %w", err)
 			}
@@ -809,7 +813,7 @@ func instancePostClusteringMigrate(s *state.State, r *http.Request, srcPool stor
 					"volatile.apply_template": origVolatileApplyTemplate,
 				}
 
-				err = tx.CreateInstanceConfig(int(id), config)
+				err = tx.CreateInstanceConfig(ctx, int(id), config)
 				if err != nil {
 					return fmt.Errorf("Failed to set volatile.apply_template config key: %w", err)
 				}
@@ -964,7 +968,16 @@ func migrateInstance(s *state.State, r *http.Request, inst instance.Instance, ta
 		return err
 	}
 
-	// Check if we are migrating a ceph-based instance.
+	// In case of live migration, only root disk can be migrated.
+	if req.Live && inst.IsRunning() {
+		for _, rawConfig := range inst.ExpandedDevices() {
+			if rawConfig["type"] == "disk" && !instancetype.IsRootDiskDevice(rawConfig) {
+				return fmt.Errorf("Cannot live migrate instance with attached custom volume")
+			}
+		}
+	}
+
+	// Retrieve storage pool of the source instance.
 	srcPool, err := storagePools.LoadByInstance(s, inst)
 	if err != nil {
 		return fmt.Errorf("Failed loading instance storage pool: %w", err)

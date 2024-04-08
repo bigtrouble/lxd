@@ -1,7 +1,10 @@
 name: Tests
 on:
-  - push
-  - pull_request
+  push:
+    branches:
+      - main
+      - stable-*
+  pull_request:
 
 permissions:
   contents: read
@@ -10,6 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # Make sure bash is always invoked with `-eo pipefail`
+    # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsshell
+    shell: bash
+
 jobs:
   code-tests:
     env:
@@ -17,14 +26,14 @@ jobs:
       CGO_LDFLAGS: "-L/home/runner/work/lxd/lxd-test/vendor/raft/.libs/ -L/home/runner/work/lxd/lxd-test/vendor/dqlite/.libs/"
       LD_LIBRARY_PATH: "/home/runner/work/lxd/lxd-test/vendor/raft/.libs/:/home/runner/work/lxd/lxd-test/vendor/dqlite/.libs/"
       CGO_LDFLAGS_ALLOW: "(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"
-    name: Code tests
+    name: Code
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@v3
+        uses: actions/dependency-review-action@v4
         if: github.event_name == 'pull_request'
 
       # XXX: `make static-analysis` also run shellcheck but this one provides
@@ -37,20 +46,23 @@ jobs:
         if: github.event_name == 'pull_request'
 
       - name: Upload artifact with ShellCheck defects in SARIF format
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Differential ShellCheck SARIF
           path: ${{ steps.ShellCheck.outputs.sarif }}
         if: github.event_name == 'pull_request'
 
-      - name: Install Go
-        uses: actions/setup-go@v4
+      # XXX: using 1.21 to workaround swagger crashing under 1.22
+      #      https://github.com/go-swagger/go-swagger/issues/3070
+      - name: Install Go (1.21)
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.18.x
+          go-version: 1.21.x
 
       - name: Install dependencies
         run: |
-          sudo add-apt-repository ppa:ubuntu-lxc/lxc-git-master -y --no-update
+          set -eux
+          sudo add-apt-repository ppa:ubuntu-lxc/daily -y --no-update
           sudo apt-get update
 
           sudo apt-get install --no-install-recommends -y \
@@ -77,37 +89,44 @@ jobs:
 
       - name: Download go dependencies
         run: |
+          set -eux
           go mod download
 
       - name: Make LXD tarball and unpack it
         env:
           CUSTOM_VERSION: "test"
         run: |
+          set -eux
           make dist
           tar -xzf lxd-test.tar.gz -C ~/work/lxd/
           rm lxd-test.tar.gz
 
       - name: Build LXD dependencies
         run: |
+          set -eux
           cd ~/work/lxd/lxd-test
           make deps
 
       - name: Run LXD build
         run: |
+          set -eux
           make
 
       - name: Run static analysis
+        env:
+          GITHUB_BEFORE: ${{ github.event.before }}
         run: |
+          set -eux
           make static-analysis
 
       - name: Unit tests (all)
         run: |
-          sudo --preserve-env=CGO_CFLAGS,CGO_LDFLAGS,CGO_LDFLAGS_ALLOW,LD_LIBRARY_PATH LD_LIBRARY_PATH=${LD_LIBRARY_PATH} go test ./...
+          set -eux
+          sudo --preserve-env=CGO_CFLAGS,CGO_LDFLAGS,CGO_LDFLAGS_ALLOW,LD_LIBRARY_PATH LD_LIBRARY_PATH=${LD_LIBRARY_PATH} env "PATH=${PATH}" go test ./...
 
   system-tests:
     env:
       CGO_LDFLAGS_ALLOW: "(-Wl,-wrap,pthread_create)|(-Wl,-z,now)"
-      LXD_SHIFTFS_DISABLE: "true"
       LXD_CEPH_CLUSTER: "ceph"
       LXD_CEPH_CEPHFS: "cephfs"
       LXD_CEPH_CEPHOBJECT_RADOSGW: "http://127.0.0.1"
@@ -116,12 +135,12 @@ jobs:
       LXD_OFFLINE: "1"
       LXD_TMPFS: "1"
       LXD_REQUIRED_TESTS: "test_storage_buckets"
-    name: System tests
+    name: System
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.18.x"]
+        go: ["1.22.x"]
         suite: ["cluster", "standalone"]
         backend: ["dir", "btrfs", "lvm", "zfs", "ceph", "random"]
         include:
@@ -131,48 +150,69 @@ jobs:
           - go: stable
             suite: standalone
             backend: dir
-          - go: tip
-            suite: cluster
-            backend: dir
-          - go: tip
-            suite: standalone
-            backend: dir
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Go (stable)
-        uses: actions/setup-go@v4
-        with:
-          go-version: ${{ matrix.go }}
-        if: matrix.go != 'tip'
-
-      - name: Install Go (tip)
+      - name: Performance tuning
         run: |
-          curl -sSfL https://storage.googleapis.com/go-build-snap/go/linux-amd64/$(git ls-remote https://github.com/golang/go.git HEAD | awk '{print $1;}').tar.gz -o gotip.tar.gz
-          ls -lah gotip.tar.gz
-          mkdir -p ~/sdk/gotip
-          tar -C ~/sdk/gotip -xzf gotip.tar.gz
-          ~/sdk/gotip/bin/go version
-          echo "PATH=$HOME/go/bin:$HOME/sdk/gotip/bin/:$PATH" >> $GITHUB_ENV
-        if: matrix.go == 'tip'
+          set -eux
+          # optimize ext4 FSes for performance, not reliability
+          for fs in $(findmnt --noheading --type ext4 --list --uniq | awk '{print $1}'); do
+            # nombcache and data=writeback cannot be changed on remount
+            sudo mount -o remount,noatime,barrier=0,commit=6000 "${fs}" || true
+          done
 
-      - name: Install dependencies
+          # disable dpkg from calling sync()
+          echo "force-unsafe-io" | sudo tee /etc/dpkg/dpkg.cfg.d/force-unsafe-io
+
+      - name: Reclaim some space
         run: |
-          set -x
-          sudo add-apt-repository ppa:ubuntu-lxc/lxc-git-master -y --no-update
-          sudo add-apt-repository ppa:dqlite/dev -y --no-update
-          sudo apt-get update
+          set -eux
 
           sudo snap remove lxd --purge
-          sudo snap remove core20 --purge || true
-          sudo apt-get autopurge moby-containerd docker uidmap -y
+          # Purge older snap revisions that are disabled/superseded by newer revisions of the same snap
+          snap list --all | while read -r name _ rev _ _ notes _; do
+            [[ "${notes}" =~ disabled$ ]] && snap remove "${name}" --revision "${rev}" --purge
+          done || true
+
+          # This was inspired from https://github.com/easimon/maximize-build-space
+          df -h /
+          # dotnet
+          sudo rm -rf /usr/share/dotnet
+          # android
+          sudo rm -rf /usr/local/lib/android
+          # haskell
+          sudo rm -rf /opt/ghc
+          df -h /
+
+      - name: Remove docker
+        run: |
+          set -eux
+          sudo apt-get autopurge -y containerd.io moby-containerd docker docker-ce podman uidmap
           sudo ip link delete docker0
           sudo nft flush ruleset
 
-          sudo systemctl mask lxc.service
-          sudo systemctl mask lxc-net.service
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go (${{ matrix.go }})
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Check compatibility with min Go version (${{ matrix.go }})
+        if: matrix.go == '1.22.x'
+        run: |
+          set -eux
+          go mod tidy -go=1.22.0
+
+      - name: Install dependencies
+        run: |
+          set -eux
+          sudo add-apt-repository ppa:ubuntu-lxc/daily -y --no-update
+          sudo add-apt-repository ppa:dqlite/dev -y --no-update
+          sudo apt-get update
+
+          sudo systemctl mask lxc.service lxc-net.service
 
           sudo apt-get install --no-install-recommends -y \
             curl \
@@ -222,18 +262,34 @@ jobs:
           curl -sSfL https://dl.min.io/server/minio/release/linux-amd64/minio --output "$(go env GOPATH)/bin/minio"
           chmod +x "$(go env GOPATH)/bin/minio"
 
+          # Also grab the latest minio client to maintain compatibility with the server.
+          curl -sSfL https://dl.min.io/client/mc/release/linux-amd64/mc --output "$(go env GOPATH)/bin/mc"
+          chmod +x "$(go env GOPATH)/bin/mc"
+
       - name: Download go dependencies
         run: |
+          set -eux
           go mod download
 
       - name: Run LXD build
         run: |
+          set -eux
           make
 
       - name: Setup MicroCeph
         if: ${{ matrix.backend == 'ceph' }}
         run: |
-          set -x
+          set -eux
+
+          cleanup() {
+            set +e
+            # dmesg may contain oops, IO errors, crashes, etc
+            echo "::group::dmesg logs"
+            journalctl --quiet --no-hostname --no-pager --boot=0 --lines=100 --dmesg
+            echo "::endgroup::"
+            exit 1
+          }
+          trap cleanup ERR HUP INT TERM
 
           # If the rootfs and the ephemeral part are on the same physical disk, giving the whole
           # disk to microceph would wipe our rootfs. Since it is pretty rare for GitHub Action
@@ -245,9 +301,15 @@ jobs:
             exit 1
           fi
 
-          sudo apt-get install --no-install-recommends -y ceph-common
+          # Free-up the ephemeral disk to use it as ceph OSD.
+          # https://github.com/canonical/microceph/issues/288 and https://github.com/canonical/microceph/issues/289
+          sudo swapoff /mnt/swapfile
+          ephemeral_disk="$(findmnt --noheadings --output SOURCE --target /mnt | sed 's/[0-9]\+$//')"
+          sudo umount /mnt
+
           sudo snap install microceph --edge
-          sleep 5
+          sudo snap connect microceph:mount-observe
+          sudo apt-get install --no-install-recommends -y ceph-common
           sudo microceph cluster bootstrap
           sudo microceph.ceph config set global osd_pool_default_size 1
           sudo microceph.ceph config set global mon_allow_pool_delete true
@@ -257,10 +319,6 @@ jobs:
           for flag in nosnaptrim noscrub nobackfill norebalance norecover noscrub nodeep-scrub; do
               sudo microceph.ceph osd set $flag
           done
-          # Repurpose the ephemeral disk for ceph OSD.
-          sudo swapoff /mnt/swapfile
-          ephemeral_disk="$(findmnt --noheadings --output SOURCE --target /mnt | sed 's/[0-9]\+$//')"
-          sudo umount /mnt
           sudo microceph disk add --wipe "${ephemeral_disk}"
           sudo rm -rf /etc/ceph
           sudo ln -s /var/snap/microceph/current/conf/ /etc/ceph
@@ -271,22 +329,32 @@ jobs:
           sudo microceph.ceph fs ls
           sleep 30
           sudo microceph.ceph status
+          # Wait until there are no more "unkowns" pgs
+          for _ in $(seq 60); do
+            if sudo microceph.ceph pg stat | grep -wF unknown; then
+              sleep 1
+            else
+              break
+            fi
+          done
+          sudo microceph.ceph status
           sudo rm -f /snap/bin/rbd
 
       - name: "Run system tests (${{ matrix.go }}, ${{ matrix.suite }}, ${{ matrix.backend }})"
         run: |
+          set -eux
           chmod +x ~
           echo "root:1000000:1000000000" | sudo tee /etc/subuid /etc/subgid
           cd test
-          sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,LXD_VERBOSE,LXD_BACKEND,LXD_CEPH_CLUSTER,LXD_CEPH_CEPHFS,LXD_CEPH_CEPHOBJECT_RADOSGW,LXD_OFFLINE,LXD_SKIP_TESTS,LXD_REQUIRED_TESTS,LXD_SHIFTFS_DISABLE LXD_BACKEND=${{ matrix.backend }} ./main.sh ${{ matrix.suite }}
+          sudo --preserve-env=PATH,GOPATH,GITHUB_ACTIONS,LXD_VERBOSE,LXD_BACKEND,LXD_CEPH_CLUSTER,LXD_CEPH_CEPHFS,LXD_CEPH_CEPHOBJECT_RADOSGW,LXD_OFFLINE,LXD_SKIP_TESTS,LXD_REQUIRED_TESTS, LXD_BACKEND=${{ matrix.backend }} ./main.sh ${{ matrix.suite }}
 
   client:
-    name: Client tests
+    name: Client
     strategy:
       fail-fast: false
       matrix:
         go:
-          - 1.18.x
+          - 1.22.x
         os:
           - ubuntu-latest
           - macos-latest
@@ -297,36 +365,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Go
-        uses: actions/setup-go@v4
+      - name: Install Go (${{ matrix.go }})
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
 
       - name: Create build directory
         run: |
-            mkdir bin
+          mkdir bin
 
       - name: Build static lxc (x86_64)
         env:
           CGO_ENABLED: 0
           GOARCH: amd64
         run: |
-          go build -o bin/lxc.x86_64 ./lxc
+          go build -ldflags "-s -w" -o trimpath -o bin/lxc.x86_64 ./lxc
 
       - name: Build static lxc (aarch64)
         env:
           CGO_ENABLED: 0
           GOARCH: arm64
         run: |
-          go build -o bin/lxc.aarch64 ./lxc
+          go build -ldflags "-s -w" -o trimpath -o bin/lxc.aarch64 ./lxc
+
+      - name: Build static lxd-benchmark
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -eux
+          GOARCH=amd64 go build -ldflags "-s -w" -o trimpath -o bin/lxd-benchmark.x86_64 ./lxd-benchmark
+          GOARCH=arm64 go build -ldflags "-s -w" -o trimpath -o bin/lxd-benchmark.aarch64 ./lxd-benchmark
 
       - name: Build static lxd-migrate
         if: runner.os == 'Linux'
         env:
           CGO_ENABLED: 0
         run: |
-          GOARCH=amd64 go build -o bin/lxd-migrate.x86_64 ./lxd-migrate
-          GOARCH=arm64 go build -o bin/lxd-migrate.aarch64 ./lxd-migrate
+          set -eux
+          GOARCH=amd64 go build -ldflags "-s -w" -o trimpath -o bin/lxd-migrate.x86_64 ./lxd-migrate
+          GOARCH=arm64 go build -ldflags "-s -w" -o trimpath -o bin/lxd-migrate.aarch64 ./lxd-migrate
 
       - name: Unit tests (client)
         env:
@@ -344,30 +422,38 @@ jobs:
         run: go test -v ./shared/...
 
       - name: Upload lxc client artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
           name: ${{ runner.os }}
           path: bin/
 
   documentation:
-    name: Documentation tests
+    name: Documentation
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Go (1.22)
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+
       - name: Install dependencies
         run: |
+          set -eux
           sudo apt-get install aspell aspell-en
           sudo snap install mdl
 
       - name: Run markdown linter
         run: |
+          set -eux
           make doc-lint
 
       - name: Run spell checker
         run: |
+          set -eux
           make doc-spellcheck
 
       - name: Run inclusive naming checker
@@ -378,17 +464,18 @@ jobs:
 
       - name: Run link checker
         run: |
+          set -eux
           make doc-linkcheck
 
       - name: Build docs (Sphinx)
-        run: make doc
-
-      - name: Print warnings (Sphinx)
-        run: if [ -s doc/.sphinx/warnings.txt ]; then cat doc/.sphinx/warnings.txt; exit 1; fi
+        run: |
+          set -eux
+          make doc
+          if [ -s doc/.sphinx/warnings.txt ]; then cat doc/.sphinx/warnings.txt; exit 1; fi
 
       - name: Upload documentation artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: documentation
           path: doc/html
@@ -417,10 +504,10 @@ jobs:
           ssh-keyscan git.launchpad.net >> ~/.ssh/known_hosts
           ssh-keygen -qlF git.launchpad.net | grep -xF 'git.launchpad.net RSA SHA256:UNOzlP66WpDuEo34Wgs8mewypV0UzqHLsIFoqwe8dYo'
 
-      - name: Install Go
-        uses: actions/setup-go@v4
+      - name: Install Go (${{ matrix.go }})
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.18.x
+          go-version: 1.22.x
 
       - name: Trigger Launchpad snap build
         env:

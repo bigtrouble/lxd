@@ -35,6 +35,26 @@ test_storage_volume_snapshots() {
   lxc storage volume show "${storage_pool}" "${storage_volume}/snap0" | grep 'name: snap0'
   lxc storage volume show "${storage_pool}" "${storage_volume}/snap0" | grep 'expires_at: 0001-01-01T00:00:00Z'
 
+  # Check if the snapshot has an UUID.
+  [ -n "$(lxc storage volume get "${storage_pool}" "${storage_volume}/snap0" volatile.uuid)" ]
+
+  # Check if the snapshot's UUID is different from the parent volume
+  [ "$(lxc storage volume get "${storage_pool}" "${storage_volume}/snap0" volatile.uuid)" != "$(lxc storage volume get "${storage_pool}" "${storage_volume}" volatile.uuid)" ]
+
+  # Check if the snapshot's UUID can be modified
+  ! lxc storage volume set "${storage_pool}" "${storage_volume}/snap0" volatile.uuid "2d94c537-5eff-4751-95b1-6a1b7d11f849" || false
+
+  # Use the 'snapshots.pattern' option to change the snapshot name
+  lxc storage volume set "${storage_pool}" "${storage_volume}" snapshots.pattern='test%d'
+  # This will create a snapshot named 'test0' and 'test1'
+  lxc storage volume snapshot "${storage_pool}" "${storage_volume}"
+  lxc storage volume snapshot "${storage_pool}" "${storage_volume}"
+  lxc storage volume list "${storage_pool}" |  grep "${storage_volume}/test0"
+  lxc storage volume list "${storage_pool}" |  grep "${storage_volume}/test1"
+  lxc storage volume rm "${storage_pool}" "${storage_volume}/test0"
+  lxc storage volume rm "${storage_pool}" "${storage_volume}/test1"
+  lxc storage volume unset "${storage_pool}" "${storage_volume}" snapshots.pattern
+
   # edit volume snapshot description
   lxc storage volume show "${storage_pool}" "${storage_volume}/snap0" | sed 's/^description:.*/description: foo/' | lxc storage volume edit "${storage_pool}" "${storage_volume}/snap0"
   lxc storage volume show "${storage_pool}" "${storage_volume}/snap0" | grep -q 'description: foo'
@@ -78,7 +98,11 @@ test_storage_volume_snapshots() {
   ! lxc storage volume restore "${storage_pool}" "${storage_volume}" snap0 || false
 
   lxc stop -f c1
+  initial_volume_uuid="$(lxc storage volume get "${storage_pool}" "${storage_volume}" volatile.uuid)"
   lxc storage volume restore "${storage_pool}" "${storage_volume}" foo
+
+  # Check if the volumes's UUID is the same as the original volume
+  [ "$(lxc storage volume get "${storage_pool}" "${storage_volume}" volatile.uuid)" = "${initial_volume_uuid}" ]
 
   lxc start c1
   lxc storage volume detach "${storage_pool}" "${storage_volume}" c1
@@ -100,11 +124,32 @@ test_storage_volume_snapshots() {
   lxc storage volume delete "${storage_pool}" "vol1"
   lxc storage volume delete "${storage_pool}" "vol1-snap0"
 
+  # Check snapshot restore of type block volumes.
+  lxc storage volume create "${storage_pool}" "vol1" --type block size=50MiB
+  lxc storage volume snapshot "${storage_pool}" "vol1" "snap0"
+  lxc storage volume restore "${storage_pool}" "vol1" "snap0"
+  lxc storage volume delete "${storage_pool}" "vol1"
+
+  # Check filesystem specific config keys cannot be applied on type block volumes.
+  ! lxc storage volume create "${storage_pool}" "vol1" --type block block.filesystem=btrfs || false
+  ! lxc storage volume create "${storage_pool}" "vol1" --type block block.mount_options=xyz || false
+
+  # Check snapshot creation dates.
+  lxc storage volume create "${storage_pool}" "vol1"
+  lxc storage volume snapshot "${storage_pool}" "vol1" "snap0"
+  ! lxc storage volume show "${storage_pool}" "vol1" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  ! lxc storage volume show "${storage_pool}" "vol1/snap0" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  lxc storage volume copy "${storage_pool}/vol1" "${storage_pool}/vol2"
+  ! lxc storage volume show "${storage_pool}" "vol2" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  [ "$(lxc storage volume show "${storage_pool}" "vol1/snap0" | awk /created_at:/)" = "$(lxc storage volume show "${storage_pool}" "vol2/snap0" | awk /created_at:/)" ]
+  lxc storage volume delete "${storage_pool}" "vol1"
+  lxc storage volume delete "${storage_pool}" "vol2"
+
   # Check snapshot copy (mode pull).
   lxc launch testimage "c1"
   lxc storage volume create "${storage_pool}" "vol1"
   lxc storage volume attach "${storage_pool}" "vol1" "c1" /mnt
-  lxc exec "c1" touch /mnt/foo
+  lxc exec "c1" -- touch /mnt/foo
   lxc delete -f "c1"
   lxc storage volume snapshot "${storage_pool}" "vol1" "snap0"
   lxc storage volume copy "${storage_pool}/vol1/snap0" "${storage_pool}/vol2" --mode pull
@@ -212,8 +257,19 @@ test_storage_volume_snapshots() {
   lxc storage volume copy "${storage_pool}/vol1/snap0" "test:${storage_pool}/vol1" --target-project project1
   [ "$(lxc query "/1.0/storage-pools/${storage_pool}/volumes?project=project1" | jq "length == 1")" = "true" ]
   lxc storage volume delete "${storage_pool}" "vol1" --project project1
-
   lxc storage volume delete "${storage_pool}" "vol1"
+
+  # Check snapshot creation dates (remote).
+  lxc storage volume create "${storage_pool}" "vol1"
+  lxc storage volume snapshot "${storage_pool}" "vol1" "snap0"
+  ! lxc storage volume show "${storage_pool}" "vol1" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  ! lxc storage volume show "${storage_pool}" "vol1/snap0" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  lxc storage volume copy "${storage_pool}/vol1" "test:${storage_pool}/vol1-copy"
+  ! lxc storage volume show "${storage_pool}" "test:${storage_pool}" "vol1-copy" | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  [ "$(lxc storage volume show "${storage_pool}" "vol1/snap0" | awk /created_at:/)" = "$(lxc storage volume show "test:${storage_pool}" "vol1-copy/snap0" | awk /created_at:/)" ]
+  lxc storage volume delete "${storage_pool}" "vol1"
+  lxc storage volume delete "${storage_pool}" "vol1-copy"
+
   lxc project delete "project1"
   lxc storage delete "${storage_pool}"
   lxc remote remove "test"

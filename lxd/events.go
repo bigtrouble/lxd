@@ -6,15 +6,16 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/events"
-	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/ws"
 )
@@ -43,27 +44,43 @@ func (r *eventsServe) String() string {
 
 func eventsSocket(s *state.State, r *http.Request, w http.ResponseWriter) error {
 	// Detect project mode.
-	projectName := queryParam(r, "project")
-	allProjects := shared.IsTrue(queryParam(r, "all-projects"))
+	projectName := request.QueryParam(r, "project")
+	allProjects := shared.IsTrue(request.QueryParam(r, "all-projects"))
 
 	if allProjects && projectName != "" {
 		return api.StatusErrorf(http.StatusBadRequest, "Cannot specify a project when requesting all projects")
 	} else if !allProjects && projectName == "" {
-		projectName = project.Default
+		projectName = api.ProjectDefaultName
 	}
 
-	if !allProjects && projectName != project.Default {
+	if !allProjects && projectName != api.ProjectDefaultName {
 		_, err := s.DB.GetProject(context.Background(), projectName)
 		if err != nil {
 			return err
 		}
 	}
 
+	var projectPermissionFunc auth.PermissionChecker
+	if projectName != "" {
+		err := s.Authorizer.CheckPermission(r.Context(), r, entity.ProjectURL(projectName), auth.EntitlementCanViewEvents)
+		if err != nil {
+			return err
+		}
+	} else if allProjects {
+		var err error
+		projectPermissionFunc, err = s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanViewEvents, entity.TypeProject)
+		if err != nil {
+			return err
+		}
+	}
+
+	canViewPrivilegedEvents := s.Authorizer.CheckPermission(r.Context(), r, entity.ServerURL(), auth.EntitlementCanViewPrivilegedEvents) == nil
+
 	types := strings.Split(r.FormValue("type"), ",")
 	if len(types) == 1 && types[0] == "" {
 		types = []string{}
 		for _, entry := range eventTypes {
-			if !s.Authorizer.UserIsAdmin(r) && shared.ValueInSlice(entry, privilegedEventTypes) {
+			if !canViewPrivilegedEvents && shared.ValueInSlice(entry, privilegedEventTypes) {
 				continue
 			}
 
@@ -78,28 +95,17 @@ func eventsSocket(s *state.State, r *http.Request, w http.ResponseWriter) error 
 		}
 	}
 
-	if shared.ValueInSlice(api.EventTypeLogging, types) && !s.Authorizer.UserIsAdmin(r) {
+	if shared.ValueInSlice(api.EventTypeLogging, types) && !canViewPrivilegedEvents {
 		return api.StatusErrorf(http.StatusForbidden, "Forbidden")
 	}
 
 	l := logger.AddContext(logger.Ctx{"remote": r.RemoteAddr})
 
-	// Upgrade the connection to websocket
-	conn, err := ws.Upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		l.Warn("Failed upgrading event connection", logger.Ctx{"err": err})
-		return nil
-	}
-
-	defer func() { _ = conn.Close() }() // Ensure listener below ends when this function ends.
-
-	s.Events.SetLocalLocation(s.ServerName)
-
 	var excludeLocations []string
 	// Get the current local serverName and store it for the events.
 	// We do that now to avoid issues with changes to the name and to limit
 	// the number of DB access to just one per connection.
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		if isClusterNotification(r) {
 			ctx := r.Context()
 
@@ -138,9 +144,18 @@ func eventsSocket(s *state.State, r *http.Request, w http.ResponseWriter) error 
 		}
 	}
 
-	listenerConnection := events.NewWebsocketListenerConnection(conn)
+	// Upgrade the connection to websocket as late as possible.
+	// This is because the client will assume it's getting events as soon as the upgrade is performed.
+	conn, err := ws.Upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		l.Warn("Failed upgrading event connection", logger.Ctx{"err": err})
+		return nil
+	}
 
-	listener, err := s.Events.AddListener(projectName, allProjects, listenerConnection, types, excludeSources, recvFunc, excludeLocations)
+	defer func() { _ = conn.Close() }() // Ensure listener below ends when this function ends.
+
+	listenerConnection := events.NewWebsocketListenerConnection(conn)
+	listener, err := s.Events.AddListener(projectName, allProjects, projectPermissionFunc, listenerConnection, types, excludeSources, recvFunc, excludeLocations)
 	if err != nil {
 		l.Warn("Failed to add event listener", logger.Ctx{"err": err})
 		return nil

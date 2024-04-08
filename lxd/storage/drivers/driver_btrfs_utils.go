@@ -3,9 +3,9 @@ package drivers
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,16 +14,16 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v2"
 
 	"github.com/canonical/lxd/lxd/backup"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // Errors.
@@ -49,7 +49,12 @@ func setReceivedUUID(path string, UUID string) error {
 
 	args := btrfsIoctlReceivedSubvolArgs{}
 
-	binUUID, err := uuid.Parse(UUID).MarshalBinary()
+	strUUID, err := uuid.Parse(UUID)
+	if err != nil {
+		return fmt.Errorf("Failed parsing UUID: %w", err)
+	}
+
+	binUUID, err := strUUID.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("Failed coverting UUID: %w", err)
 	}
@@ -90,40 +95,82 @@ func (d *btrfs) isSubvolume(path string) bool {
 	return true
 }
 
-func (d *btrfs) getSubvolumes(path string) ([]string, error) {
-	poolMountPath := GetPoolMountPath(d.name)
-	if !strings.HasPrefix(path, poolMountPath+"/") {
-		return nil, fmt.Errorf("%q is outside pool mount path %q", path, poolMountPath)
+func (d *btrfs) hasSubvolumes(path string) (bool, error) {
+	var stdout strings.Builder
+
+	err := shared.RunCommandWithFds(d.state.ShutdownCtx, nil, &stdout, "btrfs", "subvolume", "list", "-o", path)
+	if err != nil {
+		return false, err
 	}
 
-	path = strings.TrimPrefix(path, poolMountPath+"/")
+	return stdout.Len() > 0, nil
+}
 
+func (d *btrfs) getSubvolumes(path string) ([]string, error) {
 	// Make sure the path has a trailing slash.
 	if !strings.HasSuffix(path, "/") {
 		path = path + "/"
 	}
 
-	var stdout bytes.Buffer
-	err := shared.RunCommandWithFds(d.state.ShutdownCtx, nil, &stdout, "btrfs", "subvolume", "list", poolMountPath)
-	if err != nil {
-		return nil, err
+	poolMountPath := GetPoolMountPath(d.name)
+	if !strings.HasPrefix(path, poolMountPath+"/") {
+		return nil, fmt.Errorf("%q is outside pool mount path %q", path, poolMountPath)
 	}
 
-	result := []string{}
+	var result []string
 
-	scanner := bufio.NewScanner(&stdout)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+	if d.state.OS.RunningInUserNS {
+		// If using BTRFS in a nested container we cannot use "btrfs subvolume list" due to a permission error.
+		// So instead walk the directory tree testing each directory to see if it is subvolume.
+		err := filepath.Walk(path, func(fpath string, entry fs.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
 
-		if len(fields) != 9 {
-			continue
+			// Ignore the base path.
+			if strings.TrimRight(fpath, "/") == strings.TrimRight(path, "/") {
+				return nil
+			}
+
+			// Subvolumes can only be directories.
+			if !entry.IsDir() {
+				return nil
+			}
+
+			// Check if directory is a subvolume.
+			if d.isSubvolume(fpath) {
+				result = append(result, strings.TrimPrefix(fpath, path))
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// If not running inside a nested container we can use "btrfs subvolume list" to get subvolumes which is more
+		// performant than walking the directory tree.
+		var stdout bytes.Buffer
+		err := shared.RunCommandWithFds(d.state.ShutdownCtx, nil, &stdout, "btrfs", "subvolume", "list", poolMountPath)
+		if err != nil {
+			return nil, err
 		}
 
-		if !strings.HasPrefix(fields[8], path) {
-			continue
-		}
+		path = strings.TrimPrefix(path, poolMountPath+"/")
+		scanner := bufio.NewScanner(&stdout)
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
 
-		result = append(result, strings.TrimPrefix(fields[8], path))
+			if len(fields) != 9 {
+				continue
+			}
+
+			if !strings.HasPrefix(fields[8], path) {
+				continue
+			}
+
+			result = append(result, strings.TrimPrefix(fields[8], path))
+		}
 	}
 
 	return result, nil
@@ -410,7 +457,7 @@ func (d *btrfs) getSubvolumesMetaData(vol Volume) ([]BTRFSSubVolume, error) {
 
 	if !d.state.OS.RunningInUserNS {
 		// List all subvolumes in the given filesystem with their UUIDs and received UUIDs.
-		err = shared.RunCommandWithFds(context.TODO(), nil, &stdout, "btrfs", "subvolume", "list", "-u", "-R", poolMountPath)
+		err = shared.RunCommandWithFds(d.state.ShutdownCtx, nil, &stdout, "btrfs", "subvolume", "list", "-u", "-R", poolMountPath)
 		if err != nil {
 			return nil, err
 		}
@@ -448,7 +495,7 @@ func (d *btrfs) getSubVolumeReceivedUUID(vol Volume) (string, error) {
 	poolMountPath := GetPoolMountPath(vol.pool)
 
 	// List all subvolumes in the given filesystem with their UUIDs.
-	err := shared.RunCommandWithFds(context.TODO(), nil, &stdout, "btrfs", "subvolume", "list", "-R", poolMountPath)
+	err := shared.RunCommandWithFds(d.state.ShutdownCtx, nil, &stdout, "btrfs", "subvolume", "list", "-R", poolMountPath)
 	if err != nil {
 		return "", err
 	}
@@ -555,13 +602,22 @@ func (d *btrfs) loadOptimizedBackupHeader(r io.ReadSeeker, mountPath string) (*B
 }
 
 // receiveSubVolume receives a subvolume from an io.Reader into the receivePath and returns the path to the received subvolume.
-func (d *btrfs) receiveSubVolume(r io.Reader, receivePath string) (string, error) {
+func (d *btrfs) receiveSubVolume(r io.Reader, receivePath string, tracker *ioprogress.ProgressTracker) (string, error) {
 	files, err := os.ReadDir(receivePath)
 	if err != nil {
 		return "", fmt.Errorf("Failed listing contents of %q: %w", receivePath, err)
 	}
 
-	err = shared.RunCommandWithFds(context.TODO(), r, nil, "btrfs", "receive", "-e", receivePath)
+	// Setup progress tracker.
+	stdin := r
+	if tracker != nil {
+		stdin = &ioprogress.ProgressReader{
+			Reader:  r,
+			Tracker: tracker,
+		}
+	}
+
+	err = shared.RunCommandWithFds(d.state.ShutdownCtx, stdin, nil, "btrfs", "receive", "-e", receivePath)
 	if err != nil {
 		return "", err
 	}

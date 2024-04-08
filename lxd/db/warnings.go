@@ -8,12 +8,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/warningtype"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 )
 
 var warningCreate = cluster.RegisterStmt(`
@@ -22,18 +23,8 @@ INSERT INTO warnings (node_id, project_id, entity_type_code, entity_id, uuid, ty
 `)
 
 // UpsertWarningLocalNode creates or updates a warning for the local member. Returns error if no local member name.
-func (c *Cluster) UpsertWarningLocalNode(projectName string, entityTypeCode int, entityID int, typeCode warningtype.Type, message string) error {
-	var err error
-	var localName string
-
-	err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-		localName, err = tx.GetLocalNodeName(ctx)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	})
+func (c *ClusterTx) UpsertWarningLocalNode(ctx context.Context, projectName string, entityType entity.Type, entityID int, typeCode warningtype.Type, message string) error {
+	localName, err := c.GetLocalNodeName(ctx)
 	if err != nil {
 		return fmt.Errorf("Failed getting local member name: %w", err)
 	}
@@ -42,17 +33,11 @@ func (c *Cluster) UpsertWarningLocalNode(projectName string, entityTypeCode int,
 		return fmt.Errorf("Local member name not available")
 	}
 
-	return c.UpsertWarning(localName, projectName, entityTypeCode, entityID, typeCode, message)
+	return c.UpsertWarning(ctx, localName, projectName, entityType, entityID, typeCode, message)
 }
 
 // UpsertWarning creates or updates a warning.
-func (c *Cluster) UpsertWarning(nodeName string, projectName string, entityTypeCode int, entityID int, typeCode warningtype.Type, message string) error {
-	// Validate
-	_, err := c.GetURIFromEntity(entityTypeCode, entityID)
-	if err != nil {
-		return fmt.Errorf("Failed to get URI for entity ID %d with entity type code %d: %w", entityID, entityTypeCode, err)
-	}
-
+func (c *ClusterTx) UpsertWarning(ctx context.Context, nodeName string, projectName string, entityType entity.Type, entityID int, typeCode warningtype.Type, message string) error {
 	_, ok := warningtype.TypeNames[typeCode]
 	if !ok {
 		return fmt.Errorf("Unknown warning type code %d", typeCode)
@@ -60,58 +45,60 @@ func (c *Cluster) UpsertWarning(nodeName string, projectName string, entityTypeC
 
 	now := time.Now().UTC()
 
-	err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-		filter := cluster.WarningFilter{
-			TypeCode:       &typeCode,
-			Node:           &nodeName,
-			Project:        &projectName,
-			EntityTypeCode: &entityTypeCode,
-			EntityID:       &entityID,
-		}
-
-		warnings, err := cluster.GetWarnings(ctx, tx.tx, filter)
+	if entityType != "" {
+		// Validate that the entity exists.
+		_, err := cluster.GetEntityURL(ctx, c.Tx(), entityType, entityID)
 		if err != nil {
-			return fmt.Errorf("Failed to retrieve warnings: %w", err)
+			return fmt.Errorf("Failed to validate warning: %w", err)
+		}
+	}
+
+	clusterEntityType := cluster.EntityType(entityType)
+	filter := cluster.WarningFilter{
+		TypeCode:   &typeCode,
+		Node:       &nodeName,
+		Project:    &projectName,
+		EntityType: &clusterEntityType,
+		EntityID:   &entityID,
+	}
+
+	warnings, err := cluster.GetWarnings(ctx, c.tx, filter)
+	if err != nil {
+		return fmt.Errorf("Failed to retrieve warnings: %w", err)
+	}
+
+	if len(warnings) > 1 {
+		// This shouldn't happen
+		return fmt.Errorf("More than one warnings (%d) match the criteria: typeCode: %d, nodeName: %q, projectName: %q, entityType: %q, entityID: %d", len(warnings), typeCode, nodeName, projectName, entityType, entityID)
+	} else if len(warnings) == 1 {
+		// If there is a historical warning that was previously automatically resolved and the same
+		// warning has now reoccurred then set the status back to warningtype.StatusNew so it shows as
+		// a current active warning.
+		newStatus := warnings[0].Status
+		if newStatus == warningtype.StatusResolved {
+			newStatus = warningtype.StatusNew
 		}
 
-		if len(warnings) > 1 {
-			// This shouldn't happen
-			return fmt.Errorf("More than one warnings (%d) match the criteria: typeCode: %d, nodeName: %q, projectName: %q, entityTypeCode: %d, entityID: %d", len(warnings), typeCode, nodeName, projectName, entityTypeCode, entityID)
-		} else if len(warnings) == 1 {
-			// If there is a historical warning that was previously automatically resolved and the same
-			// warning has now reoccurred then set the status back to warningtype.StatusNew so it shows as
-			// a current active warning.
-			newStatus := warnings[0].Status
-			if newStatus == warningtype.StatusResolved {
-				newStatus = warningtype.StatusNew
-			}
-
-			err = tx.UpdateWarningState(warnings[0].UUID, message, newStatus)
-		} else {
-			warning := cluster.Warning{
-				Node:           nodeName,
-				Project:        projectName,
-				EntityTypeCode: entityTypeCode,
-				EntityID:       entityID,
-				UUID:           uuid.New(),
-				TypeCode:       typeCode,
-				Status:         warningtype.StatusNew,
-				FirstSeenDate:  now,
-				LastSeenDate:   now,
-				UpdatedDate:    time.Time{}.UTC(),
-				LastMessage:    message,
-				Count:          1,
-			}
-
-			_, err = tx.createWarning(ctx, warning)
+		err = c.UpdateWarningState(warnings[0].UUID, message, newStatus)
+	} else {
+		warning := cluster.Warning{
+			Node:          nodeName,
+			Project:       projectName,
+			EntityType:    clusterEntityType,
+			EntityID:      entityID,
+			UUID:          uuid.New().String(),
+			TypeCode:      typeCode,
+			Status:        warningtype.StatusNew,
+			FirstSeenDate: now,
+			LastSeenDate:  now,
+			UpdatedDate:   time.Time{}.UTC(),
+			LastMessage:   message,
+			Count:         1,
 		}
 
-		if err != nil {
-			return err
-		}
+		_, err = c.createWarning(ctx, warning)
+	}
 
-		return nil
-	})
 	if err != nil {
 		return err
 	}
@@ -200,8 +187,8 @@ func (c *ClusterTx) createWarning(ctx context.Context, object cluster.Warning) (
 		args[1] = object.Project
 	}
 
-	if object.EntityTypeCode != -1 {
-		args[2] = object.EntityTypeCode
+	if object.EntityType != "" {
+		args[2] = object.EntityType
 	}
 
 	if object.EntityID != -1 {

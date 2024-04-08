@@ -5,6 +5,7 @@ lxd-*.tar.gz
 .vagrant
 *~
 tags
+**/*.bak
 
 # Potential binaries
 fuidshift/fuidshift
@@ -15,20 +16,23 @@ lxd-benchmark/lxd-benchmark
 lxd-migrate/lxd-migrate
 lxd-user/lxd-user
 test/devlxd-client/devlxd-client
-test/macaroon-identity/macaroon-identity
 test/syscall/sysinfo/sysinfo
+test/mini-oidc/mini-oidc
+test/mini-oidc/user.data
 
 # Sphinx
 doc/html/
 doc/reference/manpages/**/*.md
 doc/.sphinx/deps/
 doc/.sphinx/.doctrees/
+doc/.sphinx/requirements.txt
 doc/.sphinx/themes/
 doc/.sphinx/venv/
 doc/.sphinx/warnings.txt
 doc/.sphinx/.wordlist.dic
 doc/.sphinx/_static/swagger-ui
 doc/.sphinx/_static/download
+doc/**/__pycache__
 
 # For Atom ctags
 .tags

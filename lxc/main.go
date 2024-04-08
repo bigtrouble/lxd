@@ -106,6 +106,9 @@ For help with any of those, simply call them with --help.`))
 	// Version handling
 	app.SetVersionTemplate("{{.Version}}\n")
 	app.Version = version.Version
+	if version.IsLTSVersion {
+		app.Version = fmt.Sprintf("%s LTS", version.Version)
+	}
 
 	// alias sub-command
 	aliasCmd := cmdAlias{global: &globalCmd}
@@ -199,7 +202,7 @@ For help with any of those, simply call them with --help.`))
 	profileCmd := cmdProfile{global: &globalCmd}
 	app.AddCommand(profileCmd.Command())
 
-	// profile sub-command
+	// project sub-command
 	projectCmd := cmdProject{global: &globalCmd}
 	app.AddCommand(projectCmd.Command())
 
@@ -250,6 +253,9 @@ For help with any of those, simply call them with --help.`))
 	// warning sub-command
 	warningCmd := cmdWarning{global: &globalCmd}
 	app.AddCommand(warningCmd.Command())
+
+	authCmd := cmdAuth{global: &globalCmd}
+	app.AddCommand(authCmd.command())
 
 	// Get help command
 	app.InitDefaultHelpCmd()
@@ -306,6 +312,8 @@ To easily setup a local LXD server in a virtual machine, consider using: https:/
 	}
 }
 
+// PreRun is set as the (*cobra.Command).PersistentPreRunE for the top level lxc command. It loads configuration and
+// performs additional checks if it detects that LXD has not been configured yet.
 func (c *cmdGlobal) PreRun(cmd *cobra.Command, args []string) error {
 	var err error
 
@@ -420,11 +428,11 @@ Or for a virtual machine: lxc launch ubuntu:22.04 --vm`)+"\n")
 	return nil
 }
 
+// PostRun is set as the (*cobra.Command).PersistentPostRunE hook on the top level lxc command.
+// It saves any configuration that must persist between runs.
 func (c *cmdGlobal) PostRun(cmd *cobra.Command, args []string) error {
-	// Macaroon teardown
 	if c.conf != nil && shared.PathExists(c.confPath) {
-		// Save cookies and OIDC tokens on exit
-		c.conf.SaveCookies()
+		// Save OIDC tokens on exit
 		c.conf.SaveOIDCTokens()
 	}
 
@@ -437,6 +445,8 @@ type remoteResource struct {
 	name   string
 }
 
+// ParseServers parses a list of remotes (`<remote>:<resource>...`) and calls (*config.Config).GetInstanceServer
+// for each remote to configure a new connection.
 func (c *cmdGlobal) ParseServers(remotes ...string) ([]remoteResource, error) {
 	servers := map[string]lxd.InstanceServer{}
 	resources := []remoteResource{}
@@ -476,6 +486,7 @@ func (c *cmdGlobal) ParseServers(remotes ...string) ([]remoteResource, error) {
 	return resources, nil
 }
 
+// CheckArgs checks that the given list of arguments has length between minArgs and maxArgs.
 func (c *cmdGlobal) CheckArgs(cmd *cobra.Command, args []string, minArgs int, maxArgs int) (bool, error) {
 	if len(args) < minArgs || (maxArgs != -1 && len(args) > maxArgs) {
 		_ = cmd.Help()

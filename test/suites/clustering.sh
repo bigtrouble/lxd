@@ -273,10 +273,10 @@ test_clustering_membership() {
 
   # Gracefully remove a node and check trust certificate is removed.
   LXD_DIR="${LXD_ONE_DIR}" lxc cluster list | grep node4
-  LXD_DIR="${LXD_ONE_DIR}" lxd sql global 'SELECT name FROM certificates WHERE type = 2' | grep node4
+  LXD_DIR="${LXD_ONE_DIR}" lxd sql global 'SELECT name FROM identities WHERE type = 3' | grep node4
   LXD_DIR="${LXD_TWO_DIR}" lxc cluster remove node4
   ! LXD_DIR="${LXD_ONE_DIR}" lxc cluster list | grep node4 || false
-  ! LXD_DIR="${LXD_ONE_DIR}" lxd sql global 'SELECT name FROM certificates WHERE type = 2' | grep node4 || false
+  ! LXD_DIR="${LXD_ONE_DIR}" lxd sql global 'SELECT name FROM identities WHERE type = 3' | grep node4 || false
 
   # The node isn't clustered anymore.
   ! LXD_DIR="${LXD_FOUR_DIR}" lxc cluster list || false
@@ -434,7 +434,7 @@ test_clustering_containers() {
   ! LXD_DIR="${LXD_ONE_DIR}" lxc cluster remove node2 || false
 
   # Exec a command in the container via node1
-  LXD_DIR="${LXD_ONE_DIR}" lxc exec foo ls / | grep -q proc
+  LXD_DIR="${LXD_ONE_DIR}" lxc exec foo -- ls / | grep -qxF proc
 
   # Pull, push and delete files from the container via node1
   ! LXD_DIR="${LXD_ONE_DIR}" lxc file pull foo/non-existing-file "${TEST_DIR}/non-existing-file" || false
@@ -663,9 +663,19 @@ test_clustering_storage() {
     LXD_DIR="${LXD_ONE_DIR}" lxc storage volume copy pool1/vol1 pool1/vol1 --target=node1 --destination-target=node2
     LXD_DIR="${LXD_ONE_DIR}" lxc storage volume copy pool1/vol1 pool1/vol1 --target=node1 --destination-target=node2 --refresh
 
+    # Check renaming storage volume works.
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume create pool1 vol2 --target=node1
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume move pool1/vol2 pool1/vol3 --target=node1
+    LXD_DIR="${LXD_TWO_DIR}" lxc storage volume show pool1 vol3 | grep -q node1
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume move pool1/vol3 pool1/vol2 --target=node1 --destination-target=node2
+    LXD_DIR="${LXD_TWO_DIR}" lxc storage volume show pool1 vol2 | grep -q node2
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume rename pool1 vol2 vol3 --target=node2
+    LXD_DIR="${LXD_TWO_DIR}" lxc storage volume show pool1 vol3 | grep -q node2
+
     # Delete pool and check cleaned up.
     LXD_DIR="${LXD_ONE_DIR}" lxc storage volume delete pool1 vol1 --target=node1
     LXD_DIR="${LXD_ONE_DIR}" lxc storage volume delete pool1 vol1 --target=node2
+    LXD_DIR="${LXD_ONE_DIR}" lxc storage volume delete pool1 vol3 --target=node2
     LXD_DIR="${LXD_TWO_DIR}" lxc storage delete pool1
     ! stat "${LXD_ONE_SOURCE}/containers" || false
     ! stat "${LXD_TWO_SOURCE}/containers" || false
@@ -1496,8 +1506,8 @@ used_by:
 EOF
   ) | LXD_DIR="${LXD_TWO_DIR}" lxc profile edit web
 
-  LXD_DIR="${LXD_TWO_DIR}" lxc exec c1 ls /mnt | grep -q hello
-  LXD_DIR="${LXD_TWO_DIR}" lxc exec c2 ls /mnt | grep -q hello
+  LXD_DIR="${LXD_TWO_DIR}" lxc exec c1 -- ls /mnt | grep -qxF hello
+  LXD_DIR="${LXD_TWO_DIR}" lxc exec c2 -- ls /mnt | grep -qxF hello
 
   LXD_DIR="${LXD_TWO_DIR}" lxc stop c1 --force
   LXD_DIR="${LXD_ONE_DIR}" lxc stop c2 --force

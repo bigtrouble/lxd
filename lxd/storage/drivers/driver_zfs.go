@@ -8,13 +8,14 @@ import (
 	"strconv"
 	"strings"
 
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/validate"
 	"github.com/canonical/lxd/shared/version"
@@ -116,18 +117,19 @@ func (d *zfs) load() error {
 // Info returns info about the driver and its environment.
 func (d *zfs) Info() Info {
 	info := Info{
-		Name:              "zfs",
-		Version:           zfsVersion,
-		OptimizedImages:   true,
-		OptimizedBackups:  true,
-		PreservesInodes:   true,
-		Remote:            d.isRemote(),
-		VolumeTypes:       []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
-		BlockBacking:      shared.IsTrue(d.config["volume.zfs.block_mode"]),
-		RunningCopyFreeze: false,
-		DirectIO:          zfsDirectIO,
-		MountedRoot:       false,
-		Buckets:           true,
+		Name:                         "zfs",
+		Version:                      zfsVersion,
+		DefaultVMBlockFilesystemSize: deviceConfig.DefaultVMBlockFilesystemSize,
+		OptimizedImages:              true,
+		OptimizedBackups:             true,
+		PreservesInodes:              true,
+		Remote:                       d.isRemote(),
+		VolumeTypes:                  []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
+		BlockBacking:                 shared.IsTrue(d.config["volume.zfs.block_mode"]),
+		RunningCopyFreeze:            false,
+		DirectIO:                     zfsDirectIO,
+		MountedRoot:                  false,
+		Buckets:                      true,
 	}
 
 	return info
@@ -429,8 +431,22 @@ func (d *zfs) Delete(op *operations.Operation) error {
 // Validate checks that all provide keys are supported and that no conflicting or missing configuration is present.
 func (d *zfs) Validate(config map[string]string) error {
 	rules := map[string]func(value string) error{
-		"size":          validate.Optional(validate.IsSize),
+		"size": validate.Optional(validate.IsSize),
+		// lxdmeta:generate(entities=storage-zfs; group=pool-conf; key=zfs.pool_name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: name of the pool
+		//  shortdesc: Name of the zpool
 		"zfs.pool_name": validate.IsAny,
+		// lxdmeta:generate(entities=storage-zfs; group=pool-conf; key=zfs.clone_copy)
+		// Set this option to `true` or `false` to enable or disable using ZFS lightweight clones rather
+		// than full dataset copies.
+		// Set the option to `rebase` to copy based on the initial image.
+		// ---
+		//  type: string
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to use ZFS lightweight clones
 		"zfs.clone_copy": validate.Optional(func(value string) error {
 			if value == "rebase" {
 				return nil
@@ -438,6 +454,12 @@ func (d *zfs) Validate(config map[string]string) error {
 
 			return validate.IsBool(value)
 		}),
+		// lxdmeta:generate(entities=storage-zfs; group=pool-conf; key=zfs.export)
+		//
+		// ---
+		//  type: bool
+		//  defaultdesc: `true`
+		//  shortdesc: Disable zpool export while an unmount is being performed
 		"zfs.export": validate.Optional(validate.IsBool),
 	}
 
@@ -475,7 +497,7 @@ func (d *zfs) Update(changedConfig map[string]string) error {
 			return err
 		}
 
-		_, err = shared.RunCommand("zpool", "online", "-e", d.name, loopPath)
+		_, err = shared.RunCommand("zpool", "online", "-e", d.config["zfs.pool_name"], loopPath)
 		if err != nil {
 			return err
 		}
@@ -685,19 +707,19 @@ func (d *zfs) patchDropBlockVolumeFilesystemExtension() error {
 	}
 
 	for _, volume := range strings.Split(out, "\n") {
-		fields := strings.SplitN(volume, "/", 3)
+		fields := strings.SplitN(volume, fmt.Sprintf("%s/images/", poolName), 2)
 
-		if len(fields) != 3 {
+		if len(fields) != 2 || fields[1] == "" {
 			continue
 		}
 
 		// Ignore non-block images, and images without filesystem extension
-		if !strings.HasSuffix(fields[2], ".block") || !strings.Contains(fields[2], "_") {
+		if !strings.HasSuffix(fields[1], ".block") || !strings.Contains(fields[1], "_") {
 			continue
 		}
 
 		// Rename zfs dataset. Snapshots will automatically be renamed.
-		newName := fmt.Sprintf("%s/images/%s.block", poolName, strings.Split(fields[2], "_")[0])
+		newName := fmt.Sprintf("%s/images/%s.block", poolName, strings.Split(fields[1], "_")[0])
 
 		_, err = shared.RunCommand("zfs", "rename", volume, newName)
 		if err != nil {

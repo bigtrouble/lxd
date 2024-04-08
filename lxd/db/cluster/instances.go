@@ -77,7 +77,7 @@ type InstanceFilter struct {
 }
 
 // ToAPI converts the database Instance to API type.
-func (i *Instance) ToAPI(ctx context.Context, tx *sql.Tx) (*api.Instance, error) {
+func (i *Instance) ToAPI(ctx context.Context, tx *sql.Tx, globalConfig map[string]any) (*api.Instance, error) {
 	profiles, err := GetInstanceProfiles(ctx, tx, i.ID)
 	if err != nil {
 		return nil, err
@@ -101,14 +101,14 @@ func (i *Instance) ToAPI(ctx context.Context, tx *sql.Tx) (*api.Instance, error)
 	}
 
 	apiDevices := DevicesToAPI(devices)
-	expandedDevices := ExpandInstanceDevices(config.NewDevices(apiDevices), apiProfiles)
+	expandedDevices := instancetype.ExpandInstanceDevices(config.NewDevices(apiDevices), apiProfiles)
 
 	config, err := GetInstanceConfig(ctx, tx, i.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	expandedConfig := ExpandInstanceConfig(config, apiProfiles)
+	expandedConfig := instancetype.ExpandInstanceConfig(globalConfig, config, apiProfiles)
 
 	archName, err := osarch.ArchitectureName(i.Architecture)
 	if err != nil {
@@ -116,15 +116,13 @@ func (i *Instance) ToAPI(ctx context.Context, tx *sql.Tx) (*api.Instance, error)
 	}
 
 	return &api.Instance{
-		InstancePut: api.InstancePut{
-			Architecture: archName,
-			Config:       config,
-			Devices:      apiDevices,
-			Ephemeral:    i.Ephemeral,
-			Profiles:     profileNames,
-			Stateful:     i.Stateful,
-			Description:  i.Description,
-		},
+		Architecture:    archName,
+		Config:          config,
+		Devices:         apiDevices,
+		Ephemeral:       i.Ephemeral,
+		Profiles:        profileNames,
+		Stateful:        i.Stateful,
+		Description:     i.Description,
 		CreatedAt:       i.CreationDate,
 		ExpandedConfig:  expandedConfig,
 		ExpandedDevices: expandedDevices.CloneNative(),

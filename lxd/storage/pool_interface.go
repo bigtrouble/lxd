@@ -9,13 +9,13 @@ import (
 	backupConfig "github.com/canonical/lxd/lxd/backup/config"
 	"github.com/canonical/lxd/lxd/cluster/request"
 	"github.com/canonical/lxd/lxd/instance"
+	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/storage/drivers"
 	"github.com/canonical/lxd/lxd/storage/s3/miniod"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/instancewriter"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // VolumeUsage contains the used and total size of a volume.
@@ -71,9 +71,9 @@ type Pool interface {
 	RenameInstance(inst instance.Instance, newName string, op *operations.Operation) error
 	DeleteInstance(inst instance.Instance, op *operations.Operation) error
 	UpdateInstance(inst instance.Instance, newDesc string, newConfig map[string]string, op *operations.Operation) error
-	UpdateInstanceBackupFile(inst instance.Instance, op *operations.Operation) error
+	UpdateInstanceBackupFile(inst instance.Instance, snapshots bool, op *operations.Operation) error
 	GenerateInstanceBackupConfig(inst instance.Instance, snapshots bool, op *operations.Operation) (*backupConfig.Config, error)
-	CheckInstanceBackupFileSnapshots(backupConf *backupConfig.Config, projectName string, deleteMissing bool, op *operations.Operation) ([]*api.InstanceSnapshot, error)
+	CheckInstanceBackupFileSnapshots(backupConf *backupConfig.Config, projectName string, op *operations.Operation) ([]*api.InstanceSnapshot, error)
 	ImportInstance(inst instance.Instance, poolVol *backupConfig.Config, op *operations.Operation) (revert.Hook, error)
 	CleanupInstancePaths(inst instance.Instance, op *operations.Operation) error
 

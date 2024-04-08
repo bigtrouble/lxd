@@ -89,25 +89,6 @@ func (c *Config) TrustCACertificates() bool {
 	return c.m.GetBool("core.trust_ca_certificates")
 }
 
-// CandidServer returns all the Candid settings needed to connect to a server.
-func (c *Config) CandidServer() (string, string, int64, string) {
-	return c.m.GetString("candid.api.url"),
-		c.m.GetString("candid.api.key"),
-		c.m.GetInt64("candid.expiry"),
-		c.m.GetString("candid.domains")
-}
-
-// RBACServer returns all the Candid settings needed to connect to a server.
-func (c *Config) RBACServer() (string, string, int64, string, string, string, string) {
-	return c.m.GetString("rbac.api.url"),
-		c.m.GetString("rbac.api.key"),
-		c.m.GetInt64("rbac.expiry"),
-		c.m.GetString("rbac.agent.url"),
-		c.m.GetString("rbac.agent.username"),
-		c.m.GetString("rbac.agent.private_key"),
-		c.m.GetString("rbac.agent.public_key")
-}
-
 // ProxyHTTPS returns the configured HTTPS proxy, if any.
 func (c *Config) ProxyHTTPS() string {
 	return c.m.GetString("core.proxy_https")
@@ -129,7 +110,7 @@ func (c *Config) HTTPSTrustedProxy() string {
 }
 
 // MAASController the configured MAAS url and key, if any.
-func (c *Config) MAASController() (string, string) {
+func (c *Config) MAASController() (apiURL string, apiKey string) {
 	url := c.m.GetString("maas.api.url")
 	key := c.m.GetString("maas.api.key")
 	return url, key
@@ -168,6 +149,11 @@ func (c *Config) NetworkOVNIntegrationBridge() string {
 // NetworkOVNNorthboundConnection returns the OVN northbound database connection string for OVN networks.
 func (c *Config) NetworkOVNNorthboundConnection() string {
 	return c.m.GetString("network.ovn.northbound_connection")
+}
+
+// NetworkOVNSSL returns all three SSL configuration keys needed for a connection.
+func (c *Config) NetworkOVNSSL() (caCert string, clientCert string, clientKey string) {
+	return c.m.GetString("network.ovn.ca_cert"), c.m.GetString("network.ovn.client_cert"), c.m.GetString("network.ovn.client_key")
 }
 
 // ShutdownTimeout returns the number of minutes to wait for running operation to complete
@@ -212,11 +198,13 @@ func (c *Config) InstancesPlacementScriptlet() string {
 	return c.m.GetString("instances.placement.scriptlet")
 }
 
-// LokiServer returns all the Loki settings needed to connect to a server.
-func (c *Config) LokiServer() (string, string, string, string, []string, string, []string) {
-	var types []string
-	var labels []string
+// InstancesMigrationStateful returns the whether or not to auto enable migration.stateful for all VM instances.
+func (c *Config) InstancesMigrationStateful() bool {
+	return c.m.GetBool("instances.migration.stateful")
+}
 
+// LokiServer returns all the Loki settings needed to connect to a server.
+func (c *Config) LokiServer() (apiURL string, authUsername string, authPassword string, apiCACert string, instance string, logLevel string, labels []string, types []string) {
 	if c.m.GetString("loki.types") != "" {
 		types = strings.Split(c.m.GetString("loki.types"), ",")
 	}
@@ -225,11 +213,11 @@ func (c *Config) LokiServer() (string, string, string, string, []string, string,
 		labels = strings.Split(c.m.GetString("loki.labels"), ",")
 	}
 
-	return c.m.GetString("loki.api.url"), c.m.GetString("loki.auth.username"), c.m.GetString("loki.auth.password"), c.m.GetString("loki.api.ca_cert"), labels, c.m.GetString("loki.loglevel"), types
+	return c.m.GetString("loki.api.url"), c.m.GetString("loki.auth.username"), c.m.GetString("loki.auth.password"), c.m.GetString("loki.api.ca_cert"), c.m.GetString("loki.instance"), c.m.GetString("loki.loglevel"), labels, types
 }
 
 // ACME returns all ACME settings needed for certificate renewal.
-func (c *Config) ACME() (string, string, string, bool) {
+func (c *Config) ACME() (domain string, email string, caURL string, agreeTOS bool) {
 	return c.m.GetString("acme.domain"), c.m.GetString("acme.email"), c.m.GetString("acme.ca_url"), c.m.GetBool("acme.agree_tos")
 }
 
@@ -244,8 +232,8 @@ func (c *Config) RemoteTokenExpiry() string {
 }
 
 // OIDCServer returns all the OpenID Connect settings needed to connect to a server.
-func (c *Config) OIDCServer() (string, string, string) {
-	return c.m.GetString("oidc.issuer"), c.m.GetString("oidc.client.id"), c.m.GetString("oidc.audience")
+func (c *Config) OIDCServer() (issuer string, clientID string, audience string, groupsClaim string) {
+	return c.m.GetString("oidc.issuer"), c.m.GetString("oidc.client.id"), c.m.GetString("oidc.audience"), c.m.GetString("oidc.groups.claim")
 }
 
 // ClusterHealingThreshold returns the configured healing threshold, i.e. the
@@ -309,16 +297,16 @@ func (c *Config) update(values map[string]any) (map[string]string, error) {
 
 // ConfigSchema defines available server configuration keys.
 var ConfigSchema = config.Schema{
-	// lxdmeta:generate(entity=server, group=acme, key=acme.ca_url)
+	// lxdmeta:generate(entities=server; group=acme; key=acme.ca_url)
 	//
 	// ---
 	//  type: string
 	//  scope: global
 	//  defaultdesc: `https://acme-v02.api.letsencrypt.org/directory`
-	//  shortdesc: Agree to ACME terms of service
+	//  shortdesc: URL to the directory resource of the ACME service
 	"acme.ca_url": {},
 
-	// lxdmeta:generate(entity=server, group=acme, key=acme.domain)
+	// lxdmeta:generate(entities=server; group=acme; key=acme.domain)
 	//
 	// ---
 	//  type: string
@@ -326,7 +314,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Domain for which the certificate is issued
 	"acme.domain": {},
 
-	// lxdmeta:generate(entity=server, group=acme, key=acme.email)
+	// lxdmeta:generate(entities=server; group=acme; key=acme.email)
 	//
 	// ---
 	//  type: string
@@ -334,7 +322,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Email address used for the account registration
 	"acme.email": {},
 
-	// lxdmeta:generate(entity=server, group=acme, key=acme.agree_tos)
+	// lxdmeta:generate(entities=server; group=acme; key=acme.agree_tos)
 	//
 	// ---
 	//  type: bool
@@ -343,7 +331,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Agree to ACME terms of service
 	"acme.agree_tos": {Type: config.Bool, Default: "false"},
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=backups.compression_algorithm)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=backups.compression_algorithm)
 	// Possible values are `bzip2`, `gzip`, `lzma`, `xz`, or `none`.
 	// ---
 	//  type: string
@@ -352,7 +340,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Compression algorithm to use for backups
 	"backups.compression_algorithm": {Default: "gzip", Validator: validate.IsCompressionAlgorithm},
 
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.offline_threshold)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.offline_threshold)
 	// Specify the number of seconds after which an unresponsive member is considered offline.
 	// ---
 	//  type: integer
@@ -360,7 +348,7 @@ var ConfigSchema = config.Schema{
 	//  defaultdesc: `20`
 	//  shortdesc: Threshold when an unresponsive member is considered offline
 	"cluster.offline_threshold": {Type: config.Int64, Default: offlineThresholdDefault(), Validator: offlineThresholdValidator},
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.images_minimal_replica)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.images_minimal_replica)
 	// Specify the minimal number of cluster members that keep a copy of a particular image.
 	// Set this option to `1` for no replication, or to `-1` to replicate images on all members.
 	// ---
@@ -370,7 +358,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Number of cluster members that replicate an image
 	"cluster.images_minimal_replica": {Type: config.Int64, Default: "3", Validator: imageMinimalReplicaValidator},
 
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.healing_threshold)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.healing_threshold)
 	// Specify the number of seconds after which an offline cluster member is to be evacuated.
 	// To disable evacuating offline members, set this option to `0`.
 	// ---
@@ -380,7 +368,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Threshold when to evacuate an offline cluster member
 	"cluster.healing_threshold": {Type: config.Int64, Default: "0"},
 
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.join_token_expiry)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.join_token_expiry)
 	//
 	// ---
 	//  type: string
@@ -389,7 +377,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Time after which a cluster join token expires
 	"cluster.join_token_expiry": {Type: config.String, Default: "3H", Validator: expiryValidator},
 
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.max_voters)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.max_voters)
 	// Specify the maximum number of cluster members that are assigned the database voter role.
 	// This must be an odd number >= `3`.
 	// ---
@@ -399,7 +387,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Number of database voter members
 	"cluster.max_voters": {Type: config.Int64, Default: "3", Validator: maxVotersValidator},
 
-	// lxdmeta:generate(entity=server, group=cluster, key=cluster.max_standby)
+	// lxdmeta:generate(entities=server; group=cluster; key=cluster.max_standby)
 	// Specify the maximum number of cluster members that are assigned the database stand-by role.
 	// This must be a number between `0` and `5`.
 	// ---
@@ -409,7 +397,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Number of database stand-by members
 	"cluster.max_standby": {Type: config.Int64, Default: "2", Validator: maxStandByValidator},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.metrics_authentication)
+	// lxdmeta:generate(entities=server; group=core; key=core.metrics_authentication)
 	//
 	// ---
 	//  type: bool
@@ -418,7 +406,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Whether to enforce authentication on the metrics endpoint
 	"core.metrics_authentication": {Type: config.Bool, Default: "true"},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.bgp_asn)
+	// lxdmeta:generate(entities=server; group=core; key=core.bgp_asn)
 	//
 	// ---
 	//  type: string
@@ -426,7 +414,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: BGP Autonomous System Number for the local server
 	"core.bgp_asn": {Type: config.Int64, Default: "0", Validator: validate.Optional(validate.IsInRange(0, 4294967294))},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.https_allowed_headers)
+	// lxdmeta:generate(entities=server; group=core; key=core.https_allowed_headers)
 	//
 	// ---
 	//  type: string
@@ -434,7 +422,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: `Access-Control-Allow-Headers` HTTP header value
 	"core.https_allowed_headers": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.https_allowed_methods)
+	// lxdmeta:generate(entities=server; group=core; key=core.https_allowed_methods)
 	//
 	// ---
 	//  type: string
@@ -442,7 +430,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: `Access-Control-Allow-Methods` HTTP header value
 	"core.https_allowed_methods": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.https_allowed_origin)
+	// lxdmeta:generate(entities=server; group=core; key=core.https_allowed_origin)
 	//
 	// ---
 	//  type: string
@@ -450,15 +438,16 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: `Access-Control-Allow-Origin` HTTP header value
 	"core.https_allowed_origin": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.https_allowed_credentials)
+	// lxdmeta:generate(entities=server; group=core; key=core.https_allowed_credentials)
 	// If enabled, the `Access-Control-Allow-Credentials` HTTP header value is set to `true`.
 	// ---
 	//  type: bool
 	//  scope: global
+	//  defaultdesc: `false`
 	//  shortdesc: Whether to set `Access-Control-Allow-Credentials`
-	"core.https_allowed_credentials": {Type: config.Bool},
+	"core.https_allowed_credentials": {Type: config.Bool, Default: "false"},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.https_trusted_proxy)
+	// lxdmeta:generate(entities=server; group=core; key=core.https_trusted_proxy)
 	// Specify a comma-separated list of IP addresses of trusted servers that provide the client's address through the proxy connection header.
 	// ---
 	//  type: string
@@ -466,7 +455,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Trusted servers to provide the client's address
 	"core.https_trusted_proxy": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.proxy_http)
+	// lxdmeta:generate(entities=server; group=core; key=core.proxy_http)
 	// If this option is not specified, LXD falls back to the `HTTP_PROXY` environment variable (if set).
 	// ---
 	//  type: string
@@ -474,7 +463,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: HTTP proxy to use
 	"core.proxy_http": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.proxy_https)
+	// lxdmeta:generate(entities=server; group=core; key=core.proxy_https)
 	// If this option is not specified, LXD falls back to the `HTTPS_PROXY` environment variable (if set).
 	// ---
 	//  type: string
@@ -482,7 +471,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: HTTPS proxy to use
 	"core.proxy_https": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.proxy_ignore_hosts)
+	// lxdmeta:generate(entities=server; group=core; key=core.proxy_ignore_hosts)
 	// Specify this option in a similar format to `NO_PROXY` (for example, `1.2.3.4,1.2.3.5`)
 	//
 	// If this option is not specified, LXD falls back to the `NO_PROXY` environment variable (if set).
@@ -492,7 +481,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Hosts that don't need the proxy
 	"core.proxy_ignore_hosts": {},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.remote_token_expiry)
+	// lxdmeta:generate(entities=server; group=core; key=core.remote_token_expiry)
 	//
 	// ---
 	//  type: string
@@ -501,7 +490,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Time after which a remote add token expires
 	"core.remote_token_expiry": {Type: config.String, Validator: validate.Optional(expiryValidator)},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.shutdown_timeout)
+	// lxdmeta:generate(entities=server; group=core; key=core.shutdown_timeout)
 	// Specify the number of minutes to wait for running operations to complete before the LXD server shuts down.
 	// ---
 	//  type: integer
@@ -510,7 +499,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: How long to wait before shutdown
 	"core.shutdown_timeout": {Type: config.Int64, Default: "5"},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.trust_password)
+	// lxdmeta:generate(entities=server; group=core; key=core.trust_password)
 	//
 	// ---
 	//  type: string
@@ -518,50 +507,16 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Password to be provided by clients to set up a trust
 	"core.trust_password": {Hidden: true, Setter: passwordSetter},
 
-	// lxdmeta:generate(entity=server, group=core, key=core.trust_ca_certificates)
+	// lxdmeta:generate(entities=server; group=core; key=core.trust_ca_certificates)
 	//
 	// ---
 	//  type: bool
 	//  scope: global
+	//  defaultdesc: `false`
 	//  shortdesc: Whether to automatically trust clients signed by the CA
-	"core.trust_ca_certificates": {Type: config.Bool},
+	"core.trust_ca_certificates": {Type: config.Bool, Default: "false"},
 
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=candid.api_key)
-	//
-	// ---
-	//  type: string
-	//  scope: global
-	//  condition: required for HTTP-only servers
-	//  shortdesc: Public key of the Candid server
-	"candid.api.key": {},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=candid.api_url)
-	//
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: URL of the external authentication endpoint using Candid
-	"candid.api.url": {},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=candid.domains)
-	// Specify a comma-separated list of allowed Candid domains.
-	// An empty string means all domains are valid.
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: Allowed Candid domains
-	"candid.domains": {},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=candid.expiry)
-	// Specify the expiry time in seconds.
-	// ---
-	//  type: integer
-	//  scope: global
-	//  defaultdesc: `3600`
-	//  shortdesc: Candid macaroon expiry
-	"candid.expiry": {Type: config.Int64, Default: "3600"},
-
-	// lxdmeta:generate(entity=server, group=images, key=images.auto_update_cached)
+	// lxdmeta:generate(entities=server; group=images; key=images.auto_update_cached)
 	//
 	// ---
 	//  type: bool
@@ -570,7 +525,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Whether to automatically update cached images
 	"images.auto_update_cached": {Type: config.Bool, Default: "true"},
 
-	// lxdmeta:generate(entity=server, group=images, key=images.auto_update_interval)
+	// lxdmeta:generate(entities=server; group=images; key=images.auto_update_interval)
 	// Specify the interval in hours.
 	// To disable looking for updates to cached images, set this option to `0`.
 	// ---
@@ -580,7 +535,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Interval at which to look for updates to cached images
 	"images.auto_update_interval": {Type: config.Int64, Default: "6"},
 
-	// lxdmeta:generate(entity=server, group=images, key=images.compression_algorithm)
+	// lxdmeta:generate(entities=server; group=images; key=images.compression_algorithm)
 	// Possible values are `bzip2`, `gzip`, `lzma`, `xz`, or `none`.
 	// ---
 	//  type: string
@@ -589,14 +544,14 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Compression algorithm to use for new images
 	"images.compression_algorithm": {Default: "gzip", Validator: validate.IsCompressionAlgorithm},
 
-	// lxdmeta:generate(entity=server, group=images, key=images.default_architecture)
+	// lxdmeta:generate(entities=server; group=images; key=images.default_architecture)
 	//
 	// ---
 	//  type: string
 	//  shortdesc: Default architecture to use in a mixed-architecture cluster
 	"images.default_architecture": {Validator: validate.Optional(validate.IsArchitecture)},
 
-	// lxdmeta:generate(entity=server, group=images, key=images.remote_cache_expiry)
+	// lxdmeta:generate(entities=server; group=images; key=images.remote_cache_expiry)
 	// Specify the number of days after which the unused cached image expires.
 	// ---
 	//  type: integer
@@ -605,7 +560,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: When an unused cached remote image is flushed
 	"images.remote_cache_expiry": {Type: config.Int64, Default: "10"},
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=instances.nic.host_name)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=instances.nic.host_name)
 	// Possible values are `random` and `mac`.
 	//
 	// If set to `random`, use the random host interface name as the host name.
@@ -617,7 +572,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: How to set the host name for a NIC
 	"instances.nic.host_name": {Validator: validate.Optional(validate.IsOneOf("random", "mac"))},
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=instances.placement.scriptlet)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=instances.placement.scriptlet)
 	// When using custom automatic instance placement logic, this option stores the scriptlet.
 	// See {ref}`clustering-instance-placement-scriptlet` for more information.
 	// ---
@@ -626,7 +581,15 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Instance placement scriptlet for automatic instance placement
 	"instances.placement.scriptlet": {Validator: validate.Optional(scriptletLoad.InstancePlacementValidate)},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.auth.username)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=instances.migration.stateful)
+	// You can override this setting for relevant instances, either in the instance-specific configuration or through a profile.
+	// ---
+	//  type: bool
+	//  scope: global
+	//  shortdesc: Whether to set `migration.stateful` to `true` for the instances
+	"instances.migration.stateful": {Type: config.Bool, Default: "false"},
+
+	// lxdmeta:generate(entities=server; group=loki; key=loki.auth.username)
 	//
 	// ---
 	//  type: string
@@ -634,7 +597,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: User name used for Loki authentication
 	"loki.auth.username": {},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.auth.password)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.auth.password)
 	//
 	// ---
 	//  type: string
@@ -642,7 +605,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Password used for Loki authentication
 	"loki.auth.password": {Hidden: true},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.api.ca_cert)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.api.ca_cert)
 	//
 	// ---
 	//  type: string
@@ -650,7 +613,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: CA certificate for the Loki server
 	"loki.api.ca_cert": {},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.api.url)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.api.url)
 	// Specify the protocol, name or IP and port. For example `https://loki.example.com:3100`. LXD will automatically add the `/loki/api/v1/push` suffix so there's no need to add it here.
 	// ---
 	//  type: string
@@ -658,14 +621,23 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: URL to the Loki server
 	"loki.api.url": {},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.labels)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.instance)
+	// This allows replacing the default instance value (server host name) by a more relevant value like a cluster identifier.
+	// ---
+	//  type: string
+	//  scope: global
+	//  defaultdesc: Local server host name or cluster member name
+	//  shortdesc: Name to use as the instance field in Loki events.
+	"loki.instance": {},
+
+	// lxdmeta:generate(entities=server; group=loki; key=loki.labels)
 	// Specify a comma-separated list of values that should be used as labels for a Loki log entry.
 	// ---
 	//  type: string
 	//  scope: global
 	//  shortdesc: Labels for a Loki log entry
 	"loki.labels": {},
-	// lxdmeta:generate(entity=server, group=loki, key=loki.loglevel)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.loglevel)
 	//
 	// ---
 	//  type: string
@@ -674,7 +646,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Minimum log level to send to the Loki server
 	"loki.loglevel": {Validator: logLevelValidator, Default: logrus.InfoLevel.String()},
 
-	// lxdmeta:generate(entity=server, group=loki, key=loki.types)
+	// lxdmeta:generate(entities=server; group=loki; key=loki.types)
 	// Specify a comma-separated list of events to send to the Loki server.
 	// The events can be any combination of `lifecycle`, `logging`, and `ovn`.
 	// ---
@@ -684,7 +656,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Events to send to the Loki server
 	"loki.types": {Validator: validate.Optional(validate.IsListOf(validate.IsOneOf("lifecycle", "logging", "ovn"))), Default: "lifecycle,logging"},
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=maas.api.key)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=maas.api.key)
 	//
 	// ---
 	//  type: string
@@ -692,7 +664,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: API key to manage MAAS
 	"maas.api.key": {},
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=maas.api.url)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=maas.api.url)
 	//
 	// ---
 	//  type: string
@@ -700,7 +672,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: URL of the MAAS server
 	"maas.api.url": {},
 
-	// lxdmeta:generate(entity=server, group=oidc, key=oidc.client.id)
+	// lxdmeta:generate(entities=server; group=oidc; key=oidc.client.id)
 	//
 	// ---
 	//  type: string
@@ -708,7 +680,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: OpenID Connect client ID
 	"oidc.client.id": {},
 
-	// lxdmeta:generate(entity=server, group=oidc, key=oidc.issuer)
+	// lxdmeta:generate(entities=server; group=oidc; key=oidc.issuer)
 	//
 	// ---
 	//  type: string
@@ -716,7 +688,7 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: OpenID Connect Discovery URL for the provider
 	"oidc.issuer": {},
 
-	// lxdmeta:generate(entity=server, group=oidc, key=oidc.audience)
+	// lxdmeta:generate(entities=server; group=oidc; key=oidc.audience)
 	// This value is required by some providers.
 	// ---
 	//  type: string
@@ -724,64 +696,19 @@ var ConfigSchema = config.Schema{
 	//  shortdesc: Expected audience value for the application
 	"oidc.audience": {},
 
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.agent.url)
-	// Specify the URL as provided during RBAC registration.
+	// lxdmeta:generate(entities=server; group=oidc; key=oidc.groups.claim)
+	// Specify a custom claim to be requested when performing OIDC flows.
+	// Configure a corresponding custom claim in your identity provider and
+	// add organization level groups to it. These can be mapped to LXD groups
+	// for automatic access control.
 	// ---
 	//  type: string
 	//  scope: global
-	//  shortdesc: URL of the Candid agent
-	"rbac.agent.url": {},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.agent.username)
-	// Specify the user name as provided during RBAC registration.
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: User name of the Candid agent
-	"rbac.agent.username": {},
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.agent.private_key)
-	// Specify the private key as provided during RBAC registration.
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: Private key of the Candid agent
-	"rbac.agent.private_key": {},
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.agent.public_key)
-	// Specify the public key as provided during RBAC registration.
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: Public key of the Candid agent
-	"rbac.agent.public_key": {},
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.api.expiry)
-	// Specify the expiry time in seconds.
-	// ---
-	//  type: integer
-	//  scope: global
-	//  shortdesc: RBAC macaroon expiry
-	"rbac.api.expiry": {Type: config.Int64, Default: "3600"},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.api.key)
-	//
-	// ---
-	//  type: string
-	//  scope: global
-	//  condition: required for HTTP-only servers
-	//  shortdesc: Public key of the RBAC server
-	"rbac.api.key": {},
-
-	// lxdmeta:generate(entity=server, group=candid-and-rbac, key=rbac.api.url)
-	//
-	// ---
-	//  type: string
-	//  scope: global
-	//  shortdesc: URL of the external RBAC server
-	"rbac.api.url": {},
-	"rbac.expiry":  {Type: config.Int64, Default: "3600"},
-
+	//  shortdesc: Expected audience value for the application
+	"oidc.groups.claim": {},
 	// OVN networking global keys.
 
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=network.ovn.integration_bridge)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=network.ovn.integration_bridge)
 	//
 	// ---
 	//  type: string
@@ -789,7 +716,7 @@ var ConfigSchema = config.Schema{
 	//  defaultdesc: `br-int`
 	//  shortdesc: OVS integration bridge to use for OVN networks
 	"network.ovn.integration_bridge": {Default: "br-int"},
-	// lxdmeta:generate(entity=server, group=miscellaneous, key=network.ovn.northbound_connection)
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=network.ovn.northbound_connection)
 	//
 	// ---
 	//  type: string
@@ -797,6 +724,33 @@ var ConfigSchema = config.Schema{
 	//  defaultdesc: `unix:/var/run/ovn/ovnnb_db.sock`
 	//  shortdesc: OVN northbound database connection string
 	"network.ovn.northbound_connection": {Default: "unix:/var/run/ovn/ovnnb_db.sock"},
+
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=network.ovn.ca_cert)
+	//
+	// ---
+	//  type: string
+	//  scope: global
+	//  defaultdesc: Content of `/etc/ovn/ovn-central.crt` if present
+	//  shortdesc: OVN SSL certificate authority
+	"network.ovn.ca_cert": {Default: ""},
+
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=network.ovn.client_cert)
+	//
+	// ---
+	//  type: string
+	//  scope: global
+	//  defaultdesc: Content of `/etc/ovn/cert_host` if present
+	//  shortdesc: OVN SSL client certificate
+	"network.ovn.client_cert": {Default: ""},
+
+	// lxdmeta:generate(entities=server; group=miscellaneous; key=network.ovn.client_key)
+	//
+	// ---
+	//  type: string
+	//  scope: global
+	//  defaultdesc: Content of `/etc/ovn/key_host` if present
+	//  shortdesc: OVN SSL client key
+	"network.ovn.client_key": {Default: ""},
 }
 
 func expiryValidator(value string) error {

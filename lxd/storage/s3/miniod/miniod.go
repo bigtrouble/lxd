@@ -13,10 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/minio/madmin-go"
+	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/pborman/uuid"
 
 	"github.com/canonical/lxd/lxd/locking"
 	"github.com/canonical/lxd/lxd/operations"
@@ -29,7 +28,7 @@ import (
 )
 
 // minioHost is the host address that the local MinIO processes will listen on.
-const minioHost = "[::1]"
+const minioHost = "127.0.0.1"
 
 // minioLockPrefix is the prefix used for per-bucket MinIO spawn lock.
 const minioLockPrefix = "minio_"
@@ -45,6 +44,7 @@ type Process struct {
 	bucketName   string
 	transactions uint
 	url          url.URL
+	consoleURL   url.URL
 	username     string
 	password     string
 	cancel       *cancel.Canceller
@@ -62,8 +62,8 @@ func (p *Process) AdminUser() string {
 }
 
 // AdminClient returns admin client for the minio process.
-func (p *Process) AdminClient() (*madmin.AdminClient, error) {
-	adminClient, err := madmin.New(p.url.Host, p.username, p.password, false)
+func (p *Process) AdminClient() (*minioAdmin, error) {
+	adminClient, err := NewAdminClient(p.url.Host, p.username, p.password)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +92,11 @@ func (p *Process) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	spawnUnlock := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, p.bucketName))
+	spawnUnlock, err := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, p.bucketName))
+	if err != nil {
+		return err
+	}
+
 	defer spawnUnlock()
 
 	defer p.cancel.Cancel()
@@ -125,31 +129,32 @@ func (p *Process) Stop(ctx context.Context) error {
 
 // WaitReady waits until process is ready.
 func (p *Process) WaitReady(ctx context.Context) error {
-	adminClient, err := p.AdminClient()
-	if err != nil {
-		p.cancel.Cancel()
-		return err
-	}
-
+	var lastErr error
 	for {
-		_, err = adminClient.GetConfig(ctx)
-		if err == nil {
-			return nil
-		}
-
-		err = ctx.Err()
-		if err != nil {
-			p.cancel.Cancel()
-
-			// If process failed to start then return start error.
-			if p.err != nil {
-				return p.err
+		select {
+		case <-ctx.Done():
+			err := fmt.Errorf("Failed to wait for MinIO server process: %w", ctx.Err())
+			if lastErr != nil {
+				err = fmt.Errorf("%w: %w", lastErr, err)
+				p.cancel.Cancel()
+				if p.err != nil {
+					err = fmt.Errorf("%w: %w", p.err, err)
+				}
 			}
 
 			return err
-		}
+		default:
+			adminClient, err := p.AdminClient()
+			if adminClient != nil {
+				_, err = adminClient.GetConfig(ctx)
+				if err == nil {
+					return nil
+				}
+			}
 
-		time.Sleep(time.Millisecond * 100)
+			lastErr = err
+			time.Sleep(time.Millisecond * 100)
+		}
 	}
 }
 
@@ -161,7 +166,11 @@ func EnsureRunning(s *state.State, bucketVol storageDrivers.Volume) (*Process, e
 	bucketName := bucketVol.Name()
 
 	// Prevent concurrent spawning of same bucket.
-	spawnUnlock := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, bucketName))
+	spawnUnlock, err := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, bucketName))
+	if err != nil {
+		return nil, err
+	}
+
 	defer spawnUnlock()
 
 	// Check if there is an existing running minio process for the bucket, and if so return it.
@@ -179,13 +188,25 @@ func EnsureRunning(s *state.State, bucketVol storageDrivers.Volume) (*Process, e
 	miniosMu.Unlock()
 
 	// Find free random port for minio process to listen on.
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:0", minioHost))
+	listener1, err := net.Listen("tcp", fmt.Sprintf("%s:0", minioHost))
 	if err != nil {
 		return nil, fmt.Errorf("Failed finding free listen port for bucket MinIO process: %w", err)
 	}
 
-	listenPort := listener.Addr().(*net.TCPAddr).Port
-	err = listener.Close()
+	listener2, err := net.Listen("tcp", fmt.Sprintf("%s:0", minioHost))
+	if err != nil {
+		return nil, fmt.Errorf("Failed finding free listen port for bucket MinIO process: %w", err)
+	}
+
+	listenPort := listener1.Addr().(*net.TCPAddr).Port
+	consolePort := listener2.Addr().(*net.TCPAddr).Port
+
+	err = listener1.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	err = listener2.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -194,8 +215,9 @@ func EnsureRunning(s *state.State, bucketVol storageDrivers.Volume) (*Process, e
 		bucketName:   bucketName,
 		transactions: 1,
 		url:          api.NewURL().Scheme("http").Host(fmt.Sprintf("%s:%d", minioHost, listenPort)).URL,
-		username:     minioAdminUser, // Persistent admin user required to keep config between restarts.
-		password:     uuid.New(),     // Random admin password for service.
+		consoleURL:   api.NewURL().Scheme("http").Host(fmt.Sprintf("%s:%d", minioHost, consolePort)).URL,
+		username:     minioAdminUser,      // Persistent admin user required to keep config between restarts.
+		password:     uuid.New().String(), // Random admin password for service.
 		cancel:       cancel.New(context.Background()),
 	}
 
@@ -215,6 +237,7 @@ func EnsureRunning(s *state.State, bucketVol storageDrivers.Volume) (*Process, e
 		"server",
 		bucketPath,
 		"--address", minioProc.url.Host,
+		"--console-address", minioProc.consoleURL.Host,
 	}
 
 	l := logger.AddContext(logger.Ctx{"bucketName": bucketName, "bucketPath": bucketPath, "listenPort": listenPort})
@@ -346,9 +369,13 @@ func EnsureRunning(s *state.State, bucketVol storageDrivers.Volume) (*Process, e
 }
 
 // Get returns an existing MinIO process if it exists.
-func Get(bucketName string) *Process {
+func Get(bucketName string) (*Process, error) {
 	// Wait for any ongoing spawn of the bucket process to finish.
-	spawnUnlock := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, bucketName))
+	spawnUnlock, err := locking.Lock(context.TODO(), fmt.Sprintf("%s%s", minioLockPrefix, bucketName))
+	if err != nil {
+		return nil, err
+	}
+
 	defer spawnUnlock()
 
 	// Check if there is an existing running minio process for the bucket, and if so return it.
@@ -361,10 +388,10 @@ func Get(bucketName string) *Process {
 		minioProc.transactions++
 		minios[bucketName] = minioProc
 
-		return minioProc
+		return minioProc, nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 // StopAll stops all MinIO processes cleanly.

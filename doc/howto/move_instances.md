@@ -20,6 +20,10 @@ Alternatively, you can use the [`lxc copy`](lxc_copy.md) command if you want to 
 
     lxc copy [<source_remote>:]<source_instance_name> <target_remote>:[<target_instance_name>]
 
+```{tip}
+If the volume already exists in the target location, use the `--refresh` flag to update the copy (see {ref}`storage-optimized-volume-transfer` for the benefits).
+```
+
 In both cases, you don't need to specify the source remote if it is your default remote, and you can leave out the target instance name if you want to use the same instance name.
 If you want to move the instance to a specific cluster member, specify it with the `--target` flag.
 In this case, do not specify the source and target remote.
@@ -53,7 +57,15 @@ To allow for live migration, you must enable support for stateful migration.
 To do so, ensure the following configuration:
 
 * Set {config:option}`instance-migration:migration.stateful` to `true` on the instance.
-* Set [`size.state`](devices-disk) of the virtual machine's root disk device to at least the size of the virtual machine's {config:option}`instance-resource-limits:limits.memory` setting.
+* Set {config:option}`device-disk-device-conf:size.state` of the virtual machine's root disk device to at least the size of the virtual machine's {config:option}`instance-resource-limits:limits.memory` setting.
+
+```{note}
+If you are using a shared storage pool like Ceph RBD to back your instance, you don't need to set {config:option}`device-disk-device-conf:size.state` to perform live migration.
+```
+
+```{note}
+When {config:option}`instance-migration:migration.stateful` is enabled in LXD, virtiofs shares are disabled, and files are only shared via the 9P protocol. Consequently, guest OSes lacking 9P support, such as CentOS 8, cannot share files with the host unless stateful migration is disabled. Additionally, the `lxd-agent` will not function for these guests under these conditions.
+```
 
 (live-migration-containers)=
 ### Live migration for containers

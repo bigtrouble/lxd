@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/canonical/lxd/shared"
 )
 
 // NewMetricSet returns a new MetricSet.
@@ -18,6 +20,22 @@ func NewMetricSet(labels map[string]string) *MetricSet {
 	}
 
 	return &out
+}
+
+// FilterSamples filters the existing samples based on the provided check.
+// When checking a sample for permission its labels get passed into the check function
+// so that the samples relation to specific identity types can be used for verification.
+func (m *MetricSet) FilterSamples(permissionCheck func(labels map[string]string) bool) {
+	for metricType, samples := range m.set {
+		allowedSamples := make([]Sample, 0, len(samples))
+		for _, s := range samples {
+			if permissionCheck(s.Labels) {
+				allowedSamples = append(allowedSamples, s)
+			}
+		}
+
+		m.set[metricType] = allowedSamples
+	}
 }
 
 // AddSamples adds samples of the type metricType to the MetricSet.
@@ -37,14 +55,24 @@ func (m *MetricSet) AddSamples(metricType MetricType, samples ...Sample) {
 	m.set[metricType] = append(m.set[metricType], samples...)
 }
 
-// Merge merges two MetricSets.
+// Merge merges two MetricSets. Missing labels from m's samples are added to all samples in n.
 func (m *MetricSet) Merge(metricSet *MetricSet) {
 	if metricSet == nil {
 		return
 	}
 
-	for k := range metricSet.set {
-		m.set[k] = append(m.set[k], metricSet.set[k]...)
+	for metricType := range metricSet.set {
+		for _, sample := range metricSet.set[metricType] {
+			// Add missing labels from m.
+			for k, v := range m.labels {
+				_, ok := sample.Labels[k]
+				if !ok {
+					sample.Labels[k] = v
+				}
+			}
+
+			m.set[metricType] = append(m.set[metricType], sample)
+		}
 	}
 }
 
@@ -61,6 +89,14 @@ func (m *MetricSet) String() string {
 		return int(metricTypes[i]) < int(metricTypes[j])
 	})
 
+	gaugeMetrics := []MetricType{
+		ProcsTotal,
+		CPUs,
+		GoGoroutines,
+		GoHeapObjects,
+		Instances,
+	}
+
 	for _, metricType := range metricTypes {
 		// Add HELP message as specified by OpenMetrics
 		_, err := out.WriteString(MetricHeaders[metricType] + "\n")
@@ -71,7 +107,7 @@ func (m *MetricSet) String() string {
 		metricTypeName := ""
 
 		// ProcsTotal is a gauge according to the OpenMetrics spec as its value can decrease.
-		if metricType == ProcsTotal || metricType == CPUs || metricType == GoGoroutines || metricType == GoHeapObjects {
+		if shared.ValueInSlice(metricType, gaugeMetrics) {
 			metricTypeName = "gauge"
 		} else if strings.HasSuffix(MetricNames[metricType], "_total") || strings.HasSuffix(MetricNames[metricType], "_seconds") {
 			metricTypeName = "counter"

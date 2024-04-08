@@ -1,7 +1,6 @@
 package ws
 
 import (
-	"context"
 	"io"
 
 	"github.com/gorilla/websocket"
@@ -11,16 +10,16 @@ import (
 
 // Mirror takes a websocket and replicates all read/write to a ReadWriteCloser.
 // Returns channels indicating when reads and writes are finished (respectively).
-func Mirror(ctx context.Context, conn *websocket.Conn, rwc io.ReadWriteCloser) (chan struct{}, chan struct{}) {
-	chRead := MirrorRead(ctx, conn, rwc)
-	chWrite := MirrorWrite(ctx, conn, rwc)
+func Mirror(conn *websocket.Conn, rwc io.ReadWriteCloser) (chan error, chan error) {
+	chRead := MirrorRead(conn, rwc)
+	chWrite := MirrorWrite(conn, rwc)
 
 	return chRead, chWrite
 }
 
-// MirrorRead is a uni-directional mirror which replicates an io.ReadCloser to a websocket.
-func MirrorRead(ctx context.Context, conn *websocket.Conn, rc io.ReadCloser) chan struct{} {
-	chDone := make(chan struct{}, 1)
+// MirrorRead is a uni-directional mirror which replicates an io.Reader to a websocket.
+func MirrorRead(conn *websocket.Conn, rc io.Reader) chan error {
+	chDone := make(chan error, 1)
 	if rc == nil {
 		close(chDone)
 		return chDone
@@ -31,31 +30,23 @@ func MirrorRead(ctx context.Context, conn *websocket.Conn, rc io.ReadCloser) cha
 	connRWC := NewWrapper(conn)
 
 	go func() {
-		defer close(chDone)
-		_, _ = io.Copy(connRWC, rc)
+		_, err := io.Copy(connRWC, rc)
+
+		logger.Debug("Websocket: Stopped read mirror", logger.Ctx{"address": conn.RemoteAddr().String(), "err": err})
 
 		// Send write barrier.
 		connRWC.Close()
 
-		logger.Debug("Websocket: Stopped read mirror", logger.Ctx{"address": conn.RemoteAddr().String()})
-	}()
-
-	go func() {
-		// Handle cancelation.
-		select {
-		case <-ctx.Done():
-			// Close the ReadCloser on cancel.
-			rc.Close()
-		case <-chDone:
-		}
+		chDone <- err
+		close(chDone)
 	}()
 
 	return chDone
 }
 
-// MirrorWrite is a uni-directional mirror which replicates a websocket to an io.WriteCloser.
-func MirrorWrite(ctx context.Context, conn *websocket.Conn, wc io.WriteCloser) chan struct{} {
-	chDone := make(chan struct{}, 1)
+// MirrorWrite is a uni-directional mirror which replicates a websocket to an io.Writer.
+func MirrorWrite(conn *websocket.Conn, wc io.Writer) chan error {
+	chDone := make(chan error, 1)
 	if wc == nil {
 		close(chDone)
 		return chDone
@@ -66,20 +57,11 @@ func MirrorWrite(ctx context.Context, conn *websocket.Conn, wc io.WriteCloser) c
 	connRWC := NewWrapper(conn)
 
 	go func() {
-		defer close(chDone)
-		_, _ = io.Copy(wc, connRWC)
+		_, err := io.Copy(wc, connRWC)
 
-		logger.Debug("Websocket: Stopped write mirror", logger.Ctx{"address": conn.RemoteAddr().String()})
-	}()
-
-	go func() {
-		// Handle cancelation.
-		select {
-		case <-ctx.Done():
-			// Close the WriteCloser on cancel.
-			wc.Close()
-		case <-chDone:
-		}
+		logger.Debug("Websocket: Stopped write mirror", logger.Ctx{"address": conn.RemoteAddr().String(), "err": err})
+		chDone <- err
+		close(chDone)
 	}()
 
 	return chDone

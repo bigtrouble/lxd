@@ -7,8 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/events"
 	"github.com/canonical/lxd/lxd/request"
@@ -17,6 +18,7 @@ import (
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/cancel"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -103,7 +105,8 @@ type Operation struct {
 	readonly    bool
 	canceler    *cancel.HTTPRequestCanceller
 	description string
-	permission  string
+	entityType  entity.Type
+	entitlement auth.Entitlement
 	dbOpType    operationtype.Type
 	requestor   *api.EventLifecycleRequestor
 	logger      logger.Logger
@@ -134,9 +137,9 @@ func OperationCreate(s *state.State, projectName string, opClass OperationClass,
 	// Main attributes
 	op := Operation{}
 	op.projectName = projectName
-	op.id = uuid.New()
+	op.id = uuid.New().String()
 	op.description = opType.Description()
-	op.permission = opType.Permission()
+	op.entityType, op.entitlement = opType.Permission()
 	op.dbOpType = opType
 	op.class = opClass
 	op.createdAt = time.Now()
@@ -659,9 +662,9 @@ func (op *Operation) SetCanceler(canceler *cancel.HTTPRequestCanceller) {
 	op.canceler = canceler
 }
 
-// Permission returns the operation permission.
-func (op *Operation) Permission() string {
-	return op.permission
+// Permission returns the operations entity.Type and auth.Entitlement.
+func (op *Operation) Permission() (entity.Type, auth.Entitlement) {
+	return op.entityType, op.entitlement
 }
 
 // Project returns the operation project.

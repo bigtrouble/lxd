@@ -4,6 +4,13 @@
 The [`lxc`](lxc.md) CLI command is pre-configured with several remote image servers.
 See {ref}`remote-image-servers` for an overview.
 
+```{note}
+If you are using the API, you can interact with different LXD servers by using their exposed API addresses.
+See {ref}`server-authenticate` for instructions on how to authenticate with the servers.
+
+{ref}`images-manage` describes how to interact with images on any LXD server through the API.
+```
+
 ## List configured remotes
 
 <!-- Include start list remotes -->
@@ -44,7 +51,7 @@ To add a LXD server as a remote, enter the following command:
 
     lxc remote add <remote_name> <IP|FQDN|URL> [flags]
 
-Some authentication methods require specific flags (for example, use [`lxc remote add <remote_name> <IP|FQDN|URL> --auth-type=candid`](lxc_remote_add.md) for Candid authentication).
+Some authentication methods require specific flags (for example, use [`lxc remote add <remote_name> <IP|FQDN|URL> --auth-type=oidc`](lxc_remote_add.md) for OIDC authentication).
 See {ref}`server-authenticate` and {ref}`authentication` for more information.
 
 For example, enter the following command to add a remote through an IP address:
@@ -60,7 +67,7 @@ To reference an image, specify its remote and its alias or fingerprint, separate
 For example:
 
     ubuntu:22.04
-    images:ubuntu/22.04
+    ubuntu-minimal:22.04
     local:ed7509d7e83f
 
 (images-remote-default)=

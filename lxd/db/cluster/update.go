@@ -106,6 +106,140 @@ var updates = map[int]schema.Update{
 	67: updateFromV66,
 	68: updateFromV67,
 	69: updateFromV68,
+	70: updateFromV69,
+	71: updateFromV70,
+	72: updateFromV71,
+	73: updateFromV72,
+}
+
+func updateFromV72(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+DROP TABLE permissions;
+DROP TABLE auth_groups_permissions;
+CREATE TABLE auth_groups_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    entity_type INTEGER NOT NULL,
+    entity_id INTEGER NOT NULL,
+    entitlement TEXT NOT NULL,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    UNIQUE (auth_group_id, entity_type, entitlement, entity_id)
+);
+`)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func updateFromV71(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `
+ALTER TABLE identities ADD COLUMN first_seen_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z";
+ALTER TABLE identities ADD COLUMN last_seen_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z";
+ALTER TABLE identities ADD COLUMN updated_date DATETIME NOT NULL DEFAULT "0001-01-01T00:00:00Z";
+`)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func updateFromV70(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE auth_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    UNIQUE (name)
+);
+
+CREATE TABLE identities_auth_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    identity_id INTEGER NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    FOREIGN KEY (identity_id) REFERENCES identities (id) ON DELETE CASCADE,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    UNIQUE (identity_id, auth_group_id)
+);
+
+CREATE TABLE identity_provider_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT NOT NULL,
+    UNIQUE (name)
+);
+
+CREATE TABLE auth_groups_identity_provider_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    identity_provider_group_id INTEGER NOT NULL,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    FOREIGN KEY (identity_provider_group_id) REFERENCES identity_provider_groups (id) ON DELETE CASCADE,
+    UNIQUE (auth_group_id, identity_provider_group_id)
+);
+
+CREATE TABLE permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    entitlement TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    UNIQUE (entitlement, entity_type, entity_id)
+);
+
+CREATE TABLE auth_groups_permissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_group_id INTEGER NOT NULL,
+    permission_id INTEGER NOT NULL,
+    FOREIGN KEY (auth_group_id) REFERENCES auth_groups (id) ON DELETE CASCADE,
+    FOREIGN KEY (permission_id) REFERENCES permissions (id) ON DELETE CASCADE,
+    UNIQUE (auth_group_id, permission_id)
+);
+`)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func updateFromV69(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE identities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    auth_method INTEGER NOT NULL,
+    type INTEGER NOT NULL,
+    identifier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    metadata TEXT NOT NULL,
+    UNIQUE (auth_method, identifier),
+    UNIQUE (type, identifier)
+);
+
+CREATE TABLE identities_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    identity_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    FOREIGN KEY (identity_id) REFERENCES identities (id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+    UNIQUE (identity_id, project_id)
+);
+
+INSERT INTO identities (id, auth_method, type, identifier, name, metadata) SELECT id, 1, 1, fingerprint, name, json_object('cert', certificate) FROM certificates WHERE type = 1 AND restricted = 1;
+INSERT INTO identities (id, auth_method, type, identifier, name, metadata) SELECT id, 1, 2, fingerprint, name, json_object('cert', certificate) FROM certificates WHERE type = 1 AND restricted = 0;
+INSERT INTO identities (id, auth_method, type, identifier, name, metadata) SELECT id, 1, 3, fingerprint, name, json_object('cert', certificate) FROM certificates WHERE type = 2;
+INSERT INTO identities (id, auth_method, type, identifier, name, metadata) SELECT id, 1, 4, fingerprint, name, json_object('cert', certificate) FROM certificates WHERE type = 3 AND restricted = 1;
+INSERT INTO identities (id, auth_method, type, identifier, name, metadata) SELECT id, 1, 6, fingerprint, name, json_object('cert', certificate) FROM certificates WHERE type = 3 AND restricted = 0;
+INSERT INTO identities_projects (identity_id, project_id) SELECT certificate_id, project_id FROM certificates_projects;
+
+DROP TABLE certificates;
+DROP TABLE certificates_projects;
+`)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // updateFromV68 fixes unique index for record name to make it zone specific.
@@ -3982,15 +4116,15 @@ CREATE INDEX profiles_project_id_idx ON profiles (project_id);
 	}
 
 	// Create a view to easily query all resources using a certain project
-	stmt := fmt.Sprintf(`
+	stmt := `
 CREATE VIEW projects_used_by_ref (name, value) AS
-  SELECT projects.name, printf('%s', containers.name, projects.name)
+  SELECT projects.name, printf('/1.0/containers/%s', containers.name, projects.name)
     FROM containers JOIN projects ON project_id=projects.id UNION
-  SELECT projects.name, printf('%s', images.fingerprint)
+  SELECT projects.name, printf('/1.0/images/%s', images.fingerprint)
     FROM images JOIN projects ON project_id=projects.id UNION
-  SELECT projects.name, printf('%s', profiles.name, projects.name)
+  SELECT projects.name, printf('/1.0/projects/%s?project=%s', profiles.name, projects.name)
     FROM profiles JOIN projects ON project_id=projects.id
-`, EntityURIs[TypeContainer], EntityURIs[TypeImage], EntityURIs[TypeProfile])
+`
 	_, err = tx.Exec(stmt)
 	if err != nil {
 		return fmt.Errorf("Failed to create projects_used_by_ref view: %w", err)
@@ -4073,16 +4207,16 @@ CREATE VIEW profiles_devices_ref (project, name, device, type, key, value) AS
 	}
 
 	// Create a view to easily query all resources using a certain profile
-	stmt = fmt.Sprintf(`
+	stmt = `
 CREATE VIEW profiles_used_by_ref (project, name, value) AS
-  SELECT projects.name, profiles.name, printf('%s', containers.name, projects.name)
+  SELECT projects.name, profiles.name, printf('/1.0/containers/%s', containers.name, projects.name)
     FROM profiles
     JOIN projects ON projects.id=profiles.project_id
     JOIN containers_profiles
       ON containers_profiles.profile_id=profiles.id
     JOIN containers
       ON containers.id=containers_profiles.container_id
-`, EntityURIs[TypeContainer])
+`
 	_, err = tx.Exec(stmt)
 	if err != nil {
 		return fmt.Errorf("Failed to create profiles_used_by_ref view: %w", err)

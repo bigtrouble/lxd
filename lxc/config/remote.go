@@ -4,27 +4,24 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"net/url"
+	"net"
 	"os"
 	"runtime"
 	"strings"
 
-	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery"
-	"github.com/go-macaroon-bakery/macaroon-bakery/v3/httpbakery/form"
-	"github.com/juju/persistent-cookiejar"
 	"github.com/zitadel/oidc/v2/pkg/oidc"
-	schemaform "gopkg.in/juju/environschema.v1/form"
 
 	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/api"
 )
 
 // Remote holds details for communication with a remote daemon.
 type Remote struct {
 	Addr     string `yaml:"addr"`
 	AuthType string `yaml:"auth_type,omitempty"`
-	Domain   string `yaml:"domain,omitempty"`
 	Project  string `yaml:"project,omitempty"`
 	Protocol string `yaml:"protocol,omitempty"`
 	Public   bool   `yaml:"public"`
@@ -33,7 +30,7 @@ type Remote struct {
 }
 
 // ParseRemote splits remote and object.
-func (c *Config) ParseRemote(raw string) (string, string, error) {
+func (c *Config) ParseRemote(raw string) (remoteName string, resourceName string, err error) {
 	result := strings.SplitN(raw, ":", 2)
 	if len(result) == 1 {
 		return c.DefaultRemote, raw, nil
@@ -80,7 +77,21 @@ func (c *Config) GetInstanceServer(name string) (lxd.InstanceServer, error) {
 	if strings.HasPrefix(remote.Addr, "unix:") {
 		d, err := lxd.ConnectLXDUnix(strings.TrimPrefix(strings.TrimPrefix(remote.Addr, "unix:"), "//"), args)
 		if err != nil {
-			return nil, err
+			var netErr *net.OpError
+
+			if errors.As(err, &netErr) {
+				if errors.Is(err, os.ErrNotExist) {
+					return nil, fmt.Errorf("LXD unix socket %q not found: Please check LXD is running", netErr.Addr)
+				}
+
+				if errors.Is(err, os.ErrPermission) {
+					return nil, fmt.Errorf("LXD unix socket %q not accessible: permission denied", netErr.Addr)
+				}
+
+				return nil, fmt.Errorf("LXD unix socket %q not accessible: %w", netErr.Addr, err)
+			}
+
+			return nil, fmt.Errorf("LXD unix socket not accessible: %w", err)
 		}
 
 		if remote.Project != "" && remote.Project != "default" {
@@ -95,7 +106,7 @@ func (c *Config) GetInstanceServer(name string) (lxd.InstanceServer, error) {
 	}
 
 	// HTTPs
-	if !shared.ValueInSlice(remote.AuthType, []string{"candid", "oidc"}) && (args.TLSClientCert == "" || args.TLSClientKey == "") {
+	if !shared.ValueInSlice(remote.AuthType, []string{api.AuthenticationMethodOIDC}) && (args.TLSClientCert == "" || args.TLSClientKey == "") {
 		return nil, fmt.Errorf("Missing TLS client certificate and key")
 	}
 
@@ -200,56 +211,7 @@ func (c *Config) getConnectionArgs(name string) (*lxd.ConnectionArgs, error) {
 		AuthType:  remote.AuthType,
 	}
 
-	if args.AuthType == "candid" {
-		args.AuthInteractor = []httpbakery.Interactor{
-			form.Interactor{Filler: schemaform.IOFiller{}},
-			httpbakery.WebBrowserInteractor{
-				OpenWebBrowser: func(uri *url.URL) error {
-					if remote.Domain != "" {
-						query := uri.Query()
-						query.Set("domain", remote.Domain)
-						uri.RawQuery = query.Encode()
-					}
-
-					return httpbakery.OpenWebBrowser(uri)
-				},
-			},
-		}
-
-		if c.cookieJars == nil || c.cookieJars[name] == nil {
-			if !shared.PathExists(c.ConfigPath("jars")) {
-				err := os.MkdirAll(c.ConfigPath("jars"), 0700)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			if !shared.PathExists(c.CookiesPath(name)) {
-				if shared.PathExists(c.ConfigPath("cookies")) {
-					err := shared.FileCopy(c.ConfigPath("cookies"), c.CookiesPath(name))
-					if err != nil {
-						return nil, err
-					}
-				}
-			}
-
-			jar, err := cookiejar.New(
-				&cookiejar.Options{
-					Filename: c.CookiesPath(name),
-				})
-			if err != nil {
-				return nil, err
-			}
-
-			if c.cookieJars == nil {
-				c.cookieJars = map[string]*cookiejar.Jar{}
-			}
-
-			c.cookieJars[name] = jar
-		}
-
-		args.CookieJar = c.cookieJars[name]
-	} else if args.AuthType == "oidc" {
+	if args.AuthType == api.AuthenticationMethodOIDC {
 		if c.oidcTokens == nil {
 			c.oidcTokens = map[string]*oidc.Tokens[*oidc.IDTokenClaims]{}
 		}
@@ -295,7 +257,7 @@ func (c *Config) getConnectionArgs(name string) (*lxd.ConnectionArgs, error) {
 	}
 
 	// Stop here if no client certificate involved
-	if remote.Protocol == "simplestreams" || shared.ValueInSlice(remote.AuthType, []string{"candid", "oidc"}) {
+	if remote.Protocol == "simplestreams" || shared.ValueInSlice(remote.AuthType, []string{api.AuthenticationMethodOIDC}) {
 		return &args, nil
 	}
 

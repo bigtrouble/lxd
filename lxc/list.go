@@ -643,7 +643,7 @@ func (c *cmdList) parseColumns(clustered bool) ([]column, bool, error) {
 
 			k := cc[0]
 			if colType == configColumnType {
-				_, err := shared.ConfigKeyChecker(k, instancetype.Any)
+				_, err := instancetype.ConfigKeyChecker(k, instancetype.Any)
 				if err != nil {
 					return nil, false, fmt.Errorf(i18n.G("Invalid config key '%s' in '%s'"), k, columnEntry)
 				}
@@ -848,7 +848,7 @@ func (c *cmdList) cpuUsageSecondsColumnData(cInfo api.InstanceFull) string {
 }
 
 func (c *cmdList) diskUsageColumnData(cInfo api.InstanceFull) string {
-	rootDisk, _, _ := shared.GetRootDiskDevice(cInfo.ExpandedDevices)
+	rootDisk, _, _ := instancetype.GetRootDiskDevice(cInfo.ExpandedDevices)
 
 	if cInfo.State != nil && cInfo.State.Disk != nil && cInfo.State.Disk[rootDisk].Usage > 0 {
 		return units.GetByteSizeStringIEC(cInfo.State.Disk[rootDisk].Usage, 2)
@@ -944,7 +944,7 @@ func (c *cmdList) matchByStatus(cInfo *api.Instance, cState *api.InstanceState, 
 }
 
 func (c *cmdList) matchByArchitecture(cInfo *api.Instance, cState *api.InstanceState, query string) bool {
-	return strings.EqualFold(cInfo.InstancePut.Architecture, query)
+	return strings.EqualFold(cInfo.Architecture, query)
 }
 
 func (c *cmdList) matchByLocation(cInfo *api.Instance, cState *api.InstanceState, query string) bool {

@@ -11,15 +11,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/instance"
 	instanceDrivers "github.com/canonical/lxd/lxd/instance/drivers"
+	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/locking"
 	"github.com/canonical/lxd/lxd/metrics"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
+	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 )
 
@@ -40,13 +45,19 @@ var metricsCmd = APIEndpoint{
 func allowMetrics(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	// Check if API is wide open.
 	if !s.GlobalConfig.MetricsAuthentication() {
 		return response.EmptySyncResponse
 	}
 
-	// If not wide open, apply project access restrictions.
-	return allowProjectPermission("containers", "view")(d, r)
+	entityType := entity.TypeServer
+
+	// Check for individual permissions on project if set.
+	projectName := request.QueryParam(r, "project")
+	if projectName != "" {
+		entityType = entity.TypeProject
+	}
+
+	return allowPermission(entityType, auth.EntitlementCanViewMetrics)(d, r)
 }
 
 // swagger:operation GET /1.0/metrics metrics metrics_get
@@ -82,7 +93,7 @@ func allowMetrics(d *Daemon, r *http.Request) response.Response {
 func metricsGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	projectName := queryParam(r, "project")
+	projectName := request.QueryParam(r, "project")
 	compress := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 
 	// Forward if requested.
@@ -98,7 +109,7 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 	metricSet := metrics.NewMetricSet(nil)
 
 	var projectNames []string
-
+	var intMetrics *metrics.MetricSet
 	err := s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
 		// Figure out the projects to retrieve.
 		if projectName != "" {
@@ -116,9 +127,8 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 			}
 		}
 
-		// Add internal metrics.
-		metricSet.Merge(internalMetrics(ctx, s.StartTime, tx))
-
+		// Register internal metrics.
+		intMetrics = internalMetrics(ctx, s.StartTime, tx)
 		return nil
 	})
 	if err != nil {
@@ -157,7 +167,7 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 
 	// If all valid, return immediately.
 	if len(projectsToFetch) == 0 {
-		return response.SyncResponsePlain(true, compress, metricSet.String())
+		return getFilteredMetrics(s, r, compress, metricSet)
 	}
 
 	cacheDuration := time.Duration(8) * time.Second
@@ -166,9 +176,9 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 	lockCtx, lockCtxCancel := context.WithTimeout(r.Context(), cacheDuration)
 	defer lockCtxCancel()
 
-	unlock := locking.Lock(lockCtx, "metricsGet")
-	if unlock == nil {
-		return response.SmartError(api.StatusErrorf(http.StatusLocked, "Metrics are currently being built by another request"))
+	unlock, err := locking.Lock(lockCtx, "metricsGet")
+	if err != nil {
+		return response.SmartError(api.StatusErrorf(http.StatusLocked, "Metrics are currently being built by another request: %s", err))
 	}
 
 	defer unlock()
@@ -182,25 +192,39 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 
 	// If all valid, return immediately.
 	if len(projectsToFetch) == 0 {
-		return response.SyncResponsePlain(true, compress, metricSet.String())
+		return getFilteredMetrics(s, r, compress, metricSet)
 	}
 
 	// Gather information about host interfaces once.
 	hostInterfaces, _ := net.Interfaces()
 
 	var instances []instance.Instance
-	err = s.DB.Cluster.InstanceList(r.Context(), func(dbInst db.InstanceArgs, p api.Project) error {
-		inst, err := instance.Load(s, dbInst, p)
-		if err != nil {
-			return fmt.Errorf("Failed loading instance %q in project %q: %w", dbInst.Name, dbInst.Project, err)
-		}
+	err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(dbInst db.InstanceArgs, p api.Project) error {
+			inst, err := instance.Load(s, dbInst, p)
+			if err != nil {
+				return fmt.Errorf("Failed loading instance %q in project %q: %w", dbInst.Name, dbInst.Project, err)
+			}
 
-		instances = append(instances, inst)
+			instances = append(instances, inst)
 
-		return nil
-	}, projectsToFetch...)
+			return nil
+		}, projectsToFetch...)
+	})
 	if err != nil {
 		return response.SmartError(err)
+	}
+
+	allProjectInstances := make(map[string]map[instancetype.Type]int)
+
+	// Total number of instances, both running and stopped.
+	for _, instance := range instances {
+		_, ok := allProjectInstances[instance.Project().Name]
+		if !ok {
+			allProjectInstances[instance.Project().Name] = make(map[instancetype.Type]int)
+		}
+
+		allProjectInstances[instance.Project().Name][instance.Type()]++
 	}
 
 	// Prepare temporary metrics storage.
@@ -226,6 +250,12 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 					// Ignore stopped instances.
 					if !errors.Is(err, instanceDrivers.ErrInstanceIsStopped) {
 						logger.Warn("Failed getting instance metrics", logger.Ctx{"instance": inst.Name(), "project": projectName, "err": err})
+					} else {
+						// If the instance is stopped, we still need to add the project to the cache.
+						// to fetch associated counter metrics.
+						if newMetrics[projectName] == nil {
+							newMetrics[projectName] = metrics.NewMetricSet(nil)
+						}
 					}
 				} else {
 					// Add the metrics.
@@ -262,8 +292,40 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 		metricsCache = map[string]metricsCacheEntry{}
 	}
 
+	// Add counter metrics for instances to the metric cache.
+	// We need to do create a distinct metric set for each project.
+	counterMetrics := make(map[string]*metrics.MetricSet, len(allProjectInstances))
+	for project, instanceCountMap := range allProjectInstances {
+		counterMetricSetPerProject := metrics.NewMetricSet(nil)
+		counterMetricSetPerProject.AddSamples(
+			metrics.Instances,
+			metrics.Sample{
+				Labels: map[string]string{"project": project, "type": instancetype.Container.String()},
+				Value:  float64(instanceCountMap[instancetype.Container]),
+			},
+		)
+		counterMetricSetPerProject.AddSamples(
+			metrics.Instances,
+			metrics.Sample{
+				Labels: map[string]string{"project": project, "type": instancetype.VM.String()},
+				Value:  float64(instanceCountMap[instancetype.VM]),
+			},
+		)
+
+		counterMetrics[project] = counterMetricSetPerProject
+	}
+
 	updatedProjects := []string{}
 	for project, entries := range newMetrics {
+		if project == "default" {
+			entries.Merge(intMetrics) // internal metrics are always considered new. Add them to the default project.
+		}
+
+		counterMetric, ok := counterMetrics[project]
+		if ok {
+			entries.Merge(counterMetric)
+		}
+
 		metricsCache[project] = metricsCacheEntry{
 			expiry:  time.Now().Add(cacheDuration),
 			metrics: entries,
@@ -284,6 +346,35 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	metricsCacheLock.Unlock()
+
+	return getFilteredMetrics(s, r, compress, metricSet)
+}
+
+func getFilteredMetrics(s *state.State, r *http.Request, compress bool, metricSet *metrics.MetricSet) response.Response {
+	// Ignore filtering in case the authentication for metrics is disabled.
+	if !s.GlobalConfig.MetricsAuthentication() {
+		return response.SyncResponsePlain(true, compress, metricSet.String())
+	}
+
+	userHasProjectPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanViewMetrics, entity.TypeProject)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	userHasServerPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanViewMetrics, entity.TypeServer)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	// Filter all metrics for view permissions.
+	// Internal server metrics without labels are compared against the server entity.
+	metricSet.FilterSamples(func(labels map[string]string) bool {
+		if labels["project"] != "" {
+			return userHasProjectPermission(entity.ProjectURL(labels["project"]))
+		}
+
+		return userHasServerPermission(entity.ServerURL())
+	})
 
 	return response.SyncResponsePlain(true, compress, metricSet.String())
 }

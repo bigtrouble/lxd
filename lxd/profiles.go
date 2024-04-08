@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/canonical/lxd/client"
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
@@ -27,6 +28,7 @@ import (
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -34,18 +36,18 @@ import (
 var profilesCmd = APIEndpoint{
 	Path: "profiles",
 
-	Get:  APIEndpointAction{Handler: profilesGet, AccessHandler: allowProjectPermission("profiles", "view")},
-	Post: APIEndpointAction{Handler: profilesPost, AccessHandler: allowProjectPermission("profiles", "manage-profiles")},
+	Get:  APIEndpointAction{Handler: profilesGet, AccessHandler: allowAuthenticated},
+	Post: APIEndpointAction{Handler: profilesPost, AccessHandler: allowPermission(entity.TypeProject, auth.EntitlementCanCreateProfiles)},
 }
 
 var profileCmd = APIEndpoint{
 	Path: "profiles/{name}",
 
-	Delete: APIEndpointAction{Handler: profileDelete, AccessHandler: allowProjectPermission("profiles", "manage-profiles")},
-	Get:    APIEndpointAction{Handler: profileGet, AccessHandler: allowProjectPermission("profiles", "view")},
-	Patch:  APIEndpointAction{Handler: profilePatch, AccessHandler: allowProjectPermission("profiles", "manage-profiles")},
-	Post:   APIEndpointAction{Handler: profilePost, AccessHandler: allowProjectPermission("profiles", "manage-profiles")},
-	Put:    APIEndpointAction{Handler: profilePut, AccessHandler: allowProjectPermission("profiles", "manage-profiles")},
+	Delete: APIEndpointAction{Handler: profileDelete, AccessHandler: allowPermission(entity.TypeProfile, auth.EntitlementCanDelete, "name")},
+	Get:    APIEndpointAction{Handler: profileGet, AccessHandler: allowPermission(entity.TypeProfile, auth.EntitlementCanView, "name")},
+	Patch:  APIEndpointAction{Handler: profilePatch, AccessHandler: allowPermission(entity.TypeProfile, auth.EntitlementCanEdit, "name")},
+	Post:   APIEndpointAction{Handler: profilePost, AccessHandler: allowPermission(entity.TypeProfile, auth.EntitlementCanEdit, "name")},
+	Put:    APIEndpointAction{Handler: profilePut, AccessHandler: allowPermission(entity.TypeProfile, auth.EntitlementCanEdit, "name")},
 }
 
 // swagger:operation GET /1.0/profiles profiles profiles_get
@@ -143,14 +145,21 @@ var profileCmd = APIEndpoint{
 func profilesGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
 	recursion := util.IsRecursionRequest(r)
 
-	var result any
+	request.SetCtxValue(r, request.CtxEffectiveProjectName, p.Name)
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanView, entity.TypeProfile)
+	if err != nil {
+		return response.InternalError(err)
+	}
+
+	var apiProfiles []*api.Profile
+	var profileURLs []string
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		filter := dbCluster.ProfileFilter{
 			Project: &p.Name,
@@ -161,30 +170,33 @@ func profilesGet(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		apiProfiles := make([]*api.Profile, len(profiles))
-		for i, profile := range profiles {
-			apiProfiles[i], err = profile.ToAPI(ctx, tx.Tx())
-			if err != nil {
-				return err
-			}
-
-			apiProfiles[i].UsedBy, err = profileUsedBy(ctx, tx, profile)
-			if err != nil {
-				return err
-			}
-
-			apiProfiles[i].UsedBy = project.FilterUsedBy(s.Authorizer, r, apiProfiles[i].UsedBy)
-		}
-
 		if recursion {
-			result = apiProfiles
-		} else {
-			urls := make([]string, len(apiProfiles))
-			for i, apiProfile := range apiProfiles {
-				urls[i] = apiProfile.URL(version.APIVersion, p.Name).String()
-			}
+			apiProfiles = make([]*api.Profile, 0, len(profiles))
+			for _, profile := range profiles {
+				if !userHasPermission(entity.ProfileURL(p.Name, profile.Name)) {
+					continue
+				}
 
-			result = urls
+				apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+				if err != nil {
+					return err
+				}
+
+				apiProfile.UsedBy, err = profileUsedBy(ctx, tx, profile)
+				if err != nil {
+					return err
+				}
+
+				apiProfiles = append(apiProfiles, apiProfile)
+			}
+		} else {
+			profileURLs = make([]string, 0, len(profiles))
+			for _, profile := range profiles {
+				profileURL := entity.ProfileURL(p.Name, profile.Name)
+				if userHasPermission(profileURL) {
+					profileURLs = append(profileURLs, profileURL.String())
+				}
+			}
 		}
 
 		return err
@@ -193,7 +205,15 @@ func profilesGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	return response.SyncResponse(true, result)
+	if !recursion {
+		return response.SyncResponse(true, profileURLs)
+	}
+
+	for _, apiProfile := range apiProfiles {
+		apiProfile.UsedBy = project.FilterUsedBy(s.Authorizer, r, apiProfile.UsedBy)
+	}
+
+	return response.SyncResponse(true, apiProfiles)
 }
 
 // profileUsedBy returns all the instance URLs that are using the given profile.
@@ -247,7 +267,7 @@ func profileUsedBy(ctx context.Context, tx *db.ClusterTx, profile dbCluster.Prof
 func profilesPost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -371,7 +391,7 @@ func profilesPost(d *Daemon, r *http.Request) response.Response {
 func profileGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -399,13 +419,13 @@ func profileGet(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		resp.UsedBy = project.FilterUsedBy(s.Authorizer, r, resp.UsedBy)
-
 		return nil
 	})
 	if err != nil {
 		return response.SmartError(err)
 	}
+
+	resp.UsedBy = project.FilterUsedBy(s.Authorizer, r, resp.UsedBy)
 
 	etag := []any{resp.Config, resp.Description, resp.Devices}
 	return response.SyncResponseETag(true, resp, etag)
@@ -448,7 +468,7 @@ func profileGet(d *Daemon, r *http.Request) response.Response {
 func profilePut(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -516,7 +536,7 @@ func profilePut(d *Daemon, r *http.Request) response.Response {
 		}
 
 		err = notifier(func(client lxd.InstanceServer) error {
-			return client.UseProject(p.Name).UpdateProfile(name, profile.ProfilePut, "")
+			return client.UseProject(p.Name).UpdateProfile(name, profile.Writable(), "")
 		})
 		if err != nil {
 			return response.SmartError(err)
@@ -566,7 +586,7 @@ func profilePut(d *Daemon, r *http.Request) response.Response {
 func profilePatch(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -696,7 +716,7 @@ func profilePatch(d *Daemon, r *http.Request) response.Response {
 func profilePost(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -776,7 +796,7 @@ func profilePost(d *Daemon, r *http.Request) response.Response {
 func profileDelete(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	p, err := project.ProfileProject(s.DB.Cluster, projectParam(r))
+	p, err := project.ProfileProject(s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}

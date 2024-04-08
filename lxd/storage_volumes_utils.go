@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/db"
+	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
@@ -13,7 +15,7 @@ import (
 	"github.com/canonical/lxd/shared/version"
 )
 
-var supportedVolumeTypes = []int{db.StoragePoolVolumeTypeContainer, db.StoragePoolVolumeTypeVM, db.StoragePoolVolumeTypeCustom, db.StoragePoolVolumeTypeImage}
+var supportedVolumeTypes = []int{cluster.StoragePoolVolumeTypeContainer, cluster.StoragePoolVolumeTypeVM, cluster.StoragePoolVolumeTypeCustom, cluster.StoragePoolVolumeTypeImage}
 
 func storagePoolVolumeUpdateUsers(s *state.State, projectName string, oldPoolName string, oldVol *api.StorageVolume, newPoolName string, newVol *api.StorageVolume) error {
 	// Update all instances that are using the volume with a local (non-expanded) device.
@@ -83,9 +85,9 @@ func storagePoolVolumeUpdateUsers(s *state.State, projectName string, oldPoolNam
 }
 
 // storagePoolVolumeUsedByGet returns a list of URL resources that use the volume.
-func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, poolName string, vol *db.StorageVolume) ([]string, error) {
+func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, vol *db.StorageVolume) ([]string, error) {
 	// Handle instance volumes.
-	if vol.Type == db.StoragePoolVolumeTypeNameContainer || vol.Type == db.StoragePoolVolumeTypeNameVM {
+	if vol.Type == cluster.StoragePoolVolumeTypeNameContainer || vol.Type == cluster.StoragePoolVolumeTypeNameVM {
 		volName, snapName, isSnap := api.GetParentAndSnapshotName(vol.Name)
 		if isSnap {
 			return []string{api.NewURL().Path(version.APIVersion, "instances", volName, "snapshots", snapName).Project(vol.Project).String()}, nil
@@ -95,12 +97,12 @@ func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, poolN
 	}
 
 	// Handle image volumes.
-	if vol.Type == db.StoragePoolVolumeTypeNameImage {
+	if vol.Type == cluster.StoragePoolVolumeTypeNameImage {
 		return []string{api.NewURL().Path(version.APIVersion, "images", vol.Name).Project(requestProjectName).Target(vol.Location).String()}, nil
 	}
 
 	// Check if the daemon itself is using it.
-	used, err := storagePools.VolumeUsedByDaemon(s, poolName, vol.Name)
+	used, err := storagePools.VolumeUsedByDaemon(s, vol.Pool, vol.Name)
 	if err != nil {
 		return []string{}, err
 	}
@@ -114,7 +116,7 @@ func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, poolN
 
 	// Pass false to expandDevices, as we only want to see instances directly using a volume, rather than their
 	// profiles using a volume.
-	err = storagePools.VolumeUsedByInstanceDevices(s, poolName, vol.Project, &vol.StorageVolume, false, func(inst db.InstanceArgs, p api.Project, usedByDevices []string) error {
+	err = storagePools.VolumeUsedByInstanceDevices(s, vol.Pool, vol.Project, &vol.StorageVolume, false, func(inst db.InstanceArgs, p api.Project, usedByDevices []string) error {
 		volumeUsedBy = append(volumeUsedBy, api.NewURL().Path(version.APIVersion, "instances", inst.Name).Project(inst.Project).String())
 		return nil
 	})
@@ -122,7 +124,7 @@ func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, poolN
 		return []string{}, err
 	}
 
-	err = storagePools.VolumeUsedByProfileDevices(s, poolName, requestProjectName, &vol.StorageVolume, func(profileID int64, profile api.Profile, p api.Project, usedByDevices []string) error {
+	err = storagePools.VolumeUsedByProfileDevices(s, vol.Pool, requestProjectName, &vol.StorageVolume, func(profileID int64, profile api.Profile, p api.Project, usedByDevices []string) error {
 		volumeUsedBy = append(volumeUsedBy, api.NewURL().Path(version.APIVersion, "profiles", profile.Name).Project(p.Name).String())
 		return nil
 	})
@@ -134,7 +136,13 @@ func storagePoolVolumeUsedByGet(s *state.State, requestProjectName string, poolN
 }
 
 func storagePoolVolumeBackupLoadByName(s *state.State, projectName, poolName, backupName string) (*backup.VolumeBackup, error) {
-	b, err := s.DB.Cluster.GetStoragePoolVolumeBackup(projectName, poolName, backupName)
+	var b db.StoragePoolVolumeBackup
+
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		b, err = tx.GetStoragePoolVolumeBackup(ctx, projectName, poolName, backupName)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

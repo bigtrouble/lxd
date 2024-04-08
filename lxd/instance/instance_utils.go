@@ -15,27 +15,27 @@ import (
 	"time"
 
 	"github.com/flosch/pongo2"
+	"github.com/google/uuid"
 	liblxc "github.com/lxc/go-lxc"
-	"github.com/pborman/uuid"
 
 	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/instance/operationlock"
 	"github.com/canonical/lxd/lxd/migration"
-	"github.com/canonical/lxd/lxd/project"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/seccomp"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/lxd/sys"
+	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/idmap"
 	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/validate"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -50,24 +50,6 @@ var Load func(s *state.State, args db.InstanceArgs, p api.Project) (Instance, er
 // Returns a revert fail function that can be used to undo this function if a subsequent step fails.
 var Create func(s *state.State, args db.InstanceArgs, p api.Project) (Instance, revert.Hook, error)
 
-func exclusiveConfigKeys(key1 string, key2 string, config map[string]string) (val string, ok bool, err error) {
-	if config[key1] != "" && config[key2] != "" {
-		return "", false, fmt.Errorf("Mutually exclusive keys %s and %s are set", key1, key2)
-	}
-
-	val, ok = config[key1]
-	if ok {
-		return
-	}
-
-	val, ok = config[key2]
-	if ok {
-		return
-	}
-
-	return "", false, nil
-}
-
 // ValidConfig validates an instance's config.
 func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanceType instancetype.Type) error {
 	if config == nil {
@@ -75,7 +57,7 @@ func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanc
 	}
 
 	for k, v := range config {
-		if instanceType == instancetype.Any && !expanded && strings.HasPrefix(k, shared.ConfigVolatilePrefix) {
+		if instanceType == instancetype.Any && !expanded && strings.HasPrefix(k, instancetype.ConfigVolatilePrefix) {
 			return fmt.Errorf("Volatile keys can only be set on instances")
 		}
 
@@ -90,29 +72,10 @@ func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanc
 	}
 
 	_, rawSeccomp := config["raw.seccomp"]
-	_, isAllow, err := exclusiveConfigKeys("security.syscalls.allow", "security.syscalls.whitelist", config)
-	if err != nil {
-		return err
-	}
-
-	_, isDeny, err := exclusiveConfigKeys("security.syscalls.deny", "security.syscalls.blacklist", config)
-	if err != nil {
-		return err
-	}
-
-	val, _, err := exclusiveConfigKeys("security.syscalls.deny_default", "security.syscalls.blacklist_default", config)
-	if err != nil {
-		return err
-	}
-
-	isDenyDefault := shared.IsTrue(val)
-
-	val, _, err = exclusiveConfigKeys("security.syscalls.deny_compat", "security.syscalls.blacklist_compat", config)
-	if err != nil {
-		return err
-	}
-
-	isDenyCompat := shared.IsTrue(val)
+	_, isAllow := config["security.syscalls.allow"]
+	_, isDeny := config["security.syscalls.deny"]
+	isDenyDefault := shared.IsTrue(config["security.syscalls.deny_default"])
+	isDenyCompat := shared.IsTrue(config["security.syscalls.deny_compat"])
 
 	if rawSeccomp && (isAllow || isDeny || isDenyDefault || isDenyCompat) {
 		return fmt.Errorf("raw.seccomp is mutually exclusive with security.syscalls*")
@@ -122,7 +85,7 @@ func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanc
 		return fmt.Errorf("security.syscalls.allow is mutually exclusive with security.syscalls.deny*")
 	}
 
-	_, err = seccomp.SyscallInterceptMountFilter(config)
+	_, err := seccomp.SyscallInterceptMountFilter(config)
 	if err != nil {
 		return err
 	}
@@ -153,7 +116,7 @@ func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanc
 }
 
 func validConfigKey(os *sys.OS, key string, value string, instanceType instancetype.Type) error {
-	f, err := shared.ConfigKeyChecker(key, instanceType)
+	f, err := instancetype.ConfigKeyChecker(key, instanceType)
 	if err != nil {
 		return err
 	}
@@ -162,11 +125,15 @@ func validConfigKey(os *sys.OS, key string, value string, instanceType instancet
 		return err
 	}
 
+	if strings.HasPrefix(key, "limits.kernel.") && instanceType == instancetype.VM {
+		return fmt.Errorf("%s isn't supported for VMs", key)
+	}
+
 	if key == "raw.lxc" {
 		return lxcValidConfig(value)
 	}
 
-	if key == "security.syscalls.deny_compat" || key == "security.syscalls.blacklist_compat" {
+	if key == "security.syscalls.deny_compat" {
 		for _, arch := range os.Architectures {
 			if arch == osarch.ARCH_64BIT_INTEL_X86 ||
 				arch == osarch.ARCH_64BIT_ARMV8_LITTLE_ENDIAN ||
@@ -180,7 +147,7 @@ func validConfigKey(os *sys.OS, key string, value string, instanceType instancet
 	return nil
 }
 
-func lxcParseRawLXC(line string) (string, string, error) {
+func lxcParseRawLXC(line string) (key string, val string, err error) {
 	// Ignore empty lines
 	if len(line) == 0 {
 		return "", "", nil
@@ -200,8 +167,8 @@ func lxcParseRawLXC(line string) (string, string, error) {
 		return "", "", fmt.Errorf("Invalid raw.lxc line: %s", line)
 	}
 
-	key := strings.ToLower(strings.Trim(membs[0], " \t"))
-	val := strings.Trim(membs[1], " \t")
+	key = strings.ToLower(strings.Trim(membs[0], " \t"))
+	val = strings.Trim(membs[1], " \t")
 	return key, val, nil
 }
 
@@ -297,8 +264,20 @@ func AllowedUnprivilegedOnlyMap(rawIdmap string) error {
 
 // LoadByID loads an instance by ID.
 func LoadByID(s *state.State, id int) (Instance, error) {
-	// Get the DB record
-	project, name, err := s.DB.Cluster.GetInstanceProjectAndName(id)
+	var project string
+	var name string
+
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		// Get the DB record
+		project, name, err = tx.GetInstanceProjectAndName(ctx, id)
+		if err != nil {
+			return fmt.Errorf("Failed getting instance project and name: %w", err)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -390,16 +369,18 @@ func LoadNodeAll(s *state.State, instanceType instancetype.Type) ([]Instance, er
 		filter.Node = &s.ServerName
 	}
 
-	err = s.DB.Cluster.InstanceList(context.TODO(), func(dbInst db.InstanceArgs, p api.Project) error {
-		inst, err := Load(s, dbInst, p)
-		if err != nil {
-			return fmt.Errorf("Failed loading instance %q in project %q: %w", dbInst.Name, dbInst.Project, err)
-		}
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(dbInst db.InstanceArgs, p api.Project) error {
+			inst, err := Load(s, dbInst, p)
+			if err != nil {
+				return fmt.Errorf("Failed loading instance %q in project %q: %w", dbInst.Name, dbInst.Project, err)
+			}
 
-		instances = append(instances, inst)
+			instances = append(instances, inst)
 
-		return nil
-	}, filter)
+			return nil
+		}, filter)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -480,16 +461,22 @@ func DeviceNextInterfaceHWAddr() (string, error) {
 
 // BackupLoadByName load an instance backup from the database.
 func BackupLoadByName(s *state.State, project, name string) (*backup.InstanceBackup, error) {
+	var args db.InstanceBackup
+
 	// Get the backup database record
-	args, err := s.DB.Cluster.GetInstanceBackup(project, name)
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		args, err = tx.GetInstanceBackup(ctx, project, name)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("Load backup from database: %w", err)
+		return nil, err
 	}
 
 	// Load the instance it belongs to
 	instance, err := LoadByID(s, args.InstanceID)
 	if err != nil {
-		return nil, fmt.Errorf("Load instance from database: %w", err)
+		return nil, err
 	}
 
 	return backup.NewInstanceBackup(s, instance, args.ID, name, args.CreationDate, args.ExpiryDate, args.InstanceOnly, args.OptimizedStorage), nil
@@ -686,21 +673,21 @@ func ValidName(instanceName string, isSnapshot bool) error {
 		parentName, snapshotName, _ := api.GetParentAndSnapshotName(instanceName)
 		err := validate.IsHostname(parentName)
 		if err != nil {
-			return fmt.Errorf("Invalid instance name: %w", err)
+			return fmt.Errorf("Invalid instance name %q: %w", parentName, err)
 		}
 
 		// Snapshot part is more flexible, but doesn't allow space or / character.
 		if strings.ContainsAny(snapshotName, " /") {
-			return fmt.Errorf("Invalid instance snapshot name: Cannot contain space or / characters")
+			return fmt.Errorf("Invalid instance snapshot name %q: Cannot contain spaces or slashes", snapshotName)
 		}
 	} else {
 		if strings.Contains(instanceName, shared.SnapshotDelimiter) {
-			return fmt.Errorf("The character %q is reserved for snapshots", shared.SnapshotDelimiter)
+			return fmt.Errorf("Invalid instance name %q: Cannot contain slashes", instanceName)
 		}
 
 		err := validate.IsHostname(instanceName)
 		if err != nil {
-			return fmt.Errorf("Invalid instance name: %w", err)
+			return fmt.Errorf("Invalid instance name %q: %w", instanceName, err)
 		}
 	}
 
@@ -725,11 +712,15 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 
 	// Set default values.
 	if args.Project == "" {
-		args.Project = project.Default
+		args.Project = api.ProjectDefaultName
 	}
 
 	if args.Profiles == nil {
-		args.Profiles, err = s.DB.Cluster.GetProfiles(args.Project, []string{"default"})
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			args.Profiles, err = tx.GetProfiles(ctx, args.Project, []string{"default"})
+
+			return err
+		})
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("Failed to get default profile for new instance")
 		}
@@ -744,7 +735,7 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 	}
 
 	if args.Config["volatile.uuid"] == "" {
-		args.Config["volatile.uuid"] = uuid.New()
+		args.Config["volatile.uuid"] = uuid.New().String()
 	}
 
 	args.Config["volatile.uuid.generation"] = args.Config["volatile.uuid"]
@@ -773,7 +764,7 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 		// Existing instances will keep using their instance name as instance-id to
 		// avoid triggering cloud-init on upgrade.
 		if args.Config["volatile.cloud-init.instance-id"] == "" {
-			args.Config["volatile.cloud-init.instance-id"] = uuid.New()
+			args.Config["volatile.cloud-init.instance-id"] = uuid.New().String()
 		}
 	}
 
@@ -795,8 +786,14 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 		return nil, nil, nil, fmt.Errorf("Requested architecture isn't supported by this host")
 	}
 
-	// Validate profiles.
-	profiles, err := s.DB.Cluster.GetProfileNames(args.Project)
+	var profiles []string
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Validate profiles.
+		profiles, err = tx.GetProfileNames(ctx, args.Project)
+
+		return err
+	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -970,7 +967,7 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 		return nil
 	})
 	if err != nil {
-		if err == db.ErrAlreadyDefined {
+		if api.StatusErrorCheck(err, http.StatusConflict) {
 			thing := "Instance"
 			if shared.IsSnapshot(args.Name) {
 				thing = "Snapshot"
@@ -982,7 +979,11 @@ func CreateInternal(s *state.State, args db.InstanceArgs, clearLogDir bool) (Ins
 		return nil, nil, nil, err
 	}
 
-	revert.Add(func() { _ = s.DB.Cluster.DeleteInstance(dbInst.Project, dbInst.Name) })
+	revert.Add(func() {
+		_ = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.DeleteInstance(ctx, dbInst.Project, dbInst.Name)
+		})
+	})
 	inst, cleanup, err := Create(s, args, *p)
 	if err != nil {
 		logger.Error("Failed initialising instance", logger.Ctx{"project": args.Project, "instance": args.Name, "type": args.Type, "err": err})
@@ -1021,7 +1022,14 @@ func NextSnapshotName(s *state.State, inst Instance, defaultPattern string) (str
 	if count > 1 {
 		return "", fmt.Errorf("Snapshot pattern may contain '%%d' only once")
 	} else if count == 1 {
-		i := s.DB.Cluster.GetNextInstanceSnapshotIndex(inst.Project().Name, inst.Name(), pattern)
+		var i int
+
+		_ = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			i = tx.GetNextInstanceSnapshotIndex(ctx, inst.Project().Name, inst.Name(), pattern)
+
+			return nil
+		})
+
 		return strings.Replace(pattern, "%d", strconv.Itoa(i), 1), nil
 	}
 
@@ -1043,16 +1051,32 @@ func NextSnapshotName(s *state.State, inst Instance, defaultPattern string) (str
 	// Append '-0', '-1', etc. if the actual pattern/snapshot name already exists
 	if snapshotExists {
 		pattern = fmt.Sprintf("%s-%%d", pattern)
-		i := s.DB.Cluster.GetNextInstanceSnapshotIndex(inst.Project().Name, inst.Name(), pattern)
+
+		var i int
+
+		_ = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			i = tx.GetNextInstanceSnapshotIndex(ctx, inst.Project().Name, inst.Name(), pattern)
+
+			return nil
+		})
 		return strings.Replace(pattern, "%d", strconv.Itoa(i), 1), nil
 	}
 
 	return pattern, nil
 }
 
-// temporaryName concatenates the move prefix and instUUID for a temporary instance.
-func temporaryName(instUUID string) string {
-	return fmt.Sprintf("lxd-move-of-%s", instUUID)
+// temporaryName returns the temporary instance name using a stable random generator.
+// The returned string is a valid DNS name.
+func temporaryName(instUUID string) (string, error) {
+	r, err := util.GetStableRandomGenerator(instUUID)
+	if err != nil {
+		return "", err
+	}
+
+	// The longest temporary name is lxd-move-18446744073709551615 which has a length
+	// of 30 characters since 18446744073709551615 is the biggest value for an uint64.
+	// The prefix is attached to have a valid DNS name that doesn't start with numbers.
+	return fmt.Sprintf("lxd-move-%d", r.Uint64()), nil
 }
 
 // MoveTemporaryName returns a name derived from the instance's volatile.uuid, to use when moving an instance
@@ -1062,14 +1086,14 @@ func temporaryName(instUUID string) string {
 func MoveTemporaryName(inst Instance) (string, error) {
 	instUUID := inst.LocalConfig()["volatile.uuid"]
 	if instUUID == "" {
-		instUUID = uuid.New()
+		instUUID = uuid.New().String()
 		err := inst.VolatileSet(map[string]string{"volatile.uuid": instUUID})
 		if err != nil {
-			return "", fmt.Errorf("Failed generating instance UUID: %w", err)
+			return "", fmt.Errorf("Failed setting volatile.uuid to %s: %w", instUUID, err)
 		}
 	}
 
-	return temporaryName(instUUID), nil
+	return temporaryName(instUUID)
 }
 
 // IsSameLogicalInstance returns true if the supplied Instance and db.Instance have the same project and name or
@@ -1084,12 +1108,22 @@ func IsSameLogicalInstance(inst Instance, dbInst *db.InstanceArgs) bool {
 	if dbInst.Config["volatile.uuid"] == inst.LocalConfig()["volatile.uuid"] {
 		// Accommodate moving instances between storage pools.
 		// Check temporary copy against source.
-		if dbInst.Name == temporaryName(inst.LocalConfig()["volatile.uuid"]) {
+		tempName, err := temporaryName(inst.LocalConfig()["volatile.uuid"])
+		if err != nil {
+			return false
+		}
+
+		if dbInst.Name == tempName {
 			return true
 		}
 
 		// Check source against temporary copy.
-		if inst.Name() == temporaryName(dbInst.Config["volatile.uuid"]) {
+		tempName, err = temporaryName(dbInst.Config["volatile.uuid"])
+		if err != nil {
+			return false
+		}
+
+		if inst.Name() == tempName {
 			return true
 		}
 
@@ -1167,7 +1201,15 @@ func SnapshotProtobufToInstanceArgs(s *state.State, inst Instance, snap *migrati
 		devices[ent.GetName()] = props
 	}
 
-	profiles, err := s.DB.Cluster.GetProfiles(inst.Project().Name, snap.Profiles)
+	var profiles []api.Profile
+
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		profiles, err = tx.GetProfiles(ctx, inst.Project().Name, snap.Profiles)
+
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

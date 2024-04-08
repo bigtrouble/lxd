@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -9,12 +8,12 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/pborman/uuid"
 
+	"github.com/canonical/lxd/lxd/linux"
 	"github.com/canonical/lxd/lxd/migration"
 	"github.com/canonical/lxd/lxd/rsync"
-	"github.com/canonical/lxd/shared/linux"
 	"github.com/canonical/lxd/shared/ws"
 )
 
@@ -29,7 +28,7 @@ func rsyncSend(conn *websocket.Conn, path string, rsyncArgs string) error {
 		defer func() { _ = dataSocket.Close() }()
 	}
 
-	readDone, writeDone := ws.Mirror(context.Background(), conn, dataSocket)
+	readDone, writeDone := ws.Mirror(conn, dataSocket)
 	<-writeDone
 	_ = dataSocket.Close()
 
@@ -52,7 +51,7 @@ func rsyncSend(conn *websocket.Conn, path string, rsyncArgs string) error {
 
 // Spawn the rsync process.
 func rsyncSendSetup(path string, rsyncArgs string) (*exec.Cmd, net.Conn, io.ReadCloser, error) {
-	auds := fmt.Sprintf("@lxc-to-lxd/%s", uuid.New())
+	auds := fmt.Sprintf("@lxc-to-lxd/%s", uuid.New().String())
 	if len(auds) > linux.ABSTRACT_UNIX_SOCK_LEN-1 {
 		auds = auds[:linux.ABSTRACT_UNIX_SOCK_LEN-1]
 	}

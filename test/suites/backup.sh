@@ -50,8 +50,8 @@ EOF
 
   if [ "$poolDriver" = "zfs" ]; then
     # Ensure custom storage volumes have been recovered.
-    lxc storage volume show "${poolName}" vol3| grep -q 'content_type: filesystem'
-    lxc storage volume show "${poolName}" vol4| grep -q 'content_type: filesystem'
+    lxc storage volume show "${poolName}" vol3 | grep -q 'content_type: filesystem'
+    lxc storage volume show "${poolName}" vol4 | grep -q 'content_type: filesystem'
 
     # Cleanup
     lxc storage volume delete "${poolName}" vol3
@@ -62,7 +62,7 @@ EOF
   rm -f foo.iso
   lxc storage volume delete "${poolName}" vol1
   lxc storage volume delete "${poolName}" vol2
-  shutdown_lxd "${LXD_DIR}"
+  shutdown_lxd "${LXD_IMPORT_DIR}"
 }
 
 test_container_recover() {
@@ -342,6 +342,7 @@ test_backup_import() {
 
 test_backup_import_with_project() {
   project="default"
+  pool="lxdtest-$(basename "${LXD_DIR}")"
 
   if [ "$#" -ne 0 ]; then
     # Create a projects
@@ -354,7 +355,6 @@ test_backup_import_with_project() {
     deps/import-busybox --project "$project-b" --alias testimage
 
     # Add a root device to the default profile of the project
-    pool="lxdtest-$(basename "${LXD_DIR}")"
     lxc profile device add default root disk path="/" pool="${pool}"
     lxc profile device add default root disk path="/" pool="${pool}" --project "$project-b"
   fi
@@ -397,6 +397,8 @@ test_backup_import_with_project() {
     lxc export c2 "${LXD_DIR}/c2-optimized.tar.gz" --optimized-storage
   fi
 
+  old_uuid="$(lxc storage volume get "${pool}" container/c2 volatile.uuid)"
+  old_snap0_uuid="$(lxc storage volume get "${pool}" container/c2/snap0 volatile.uuid)"
   lxc export c2 "${LXD_DIR}/c2.tar.gz"
   lxc delete --force c2
 
@@ -404,6 +406,13 @@ test_backup_import_with_project() {
   lxc import "${LXD_DIR}/c2.tar.gz" c3
   lxc info c2 | grep snap0
   lxc info c3 | grep snap0
+
+  # Check if the imported instance and its snapshot have a new UUID.
+  [ -n "$(lxc storage volume get "${pool}" container/c2 volatile.uuid)" ]
+  [ -n "$(lxc storage volume get "${pool}" container/c2/snap0 volatile.uuid)" ]
+  [ "$(lxc storage volume get "${pool}" container/c2 volatile.uuid)" != "${old_uuid}" ]
+  [ "$(lxc storage volume get "${pool}" container/c2/snap0 volatile.uuid)" != "${old_snap0_uuid}" ]
+
   lxc start c2
   lxc start c3
   lxc stop c2 --force
@@ -608,14 +617,14 @@ test_backup_rename() {
   ensure_import_testimage
   ensure_has_localhost_remote "${LXD_ADDR}"
 
-  if ! lxc query -X POST /1.0/containers/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance not found" ; then
+  if ! lxc query -X POST /1.0/containers/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance backup not found" ; then
     echo "invalid rename response for missing container"
     false
   fi
 
   lxc init testimage c1
 
-  if ! lxc query -X POST /1.0/containers/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Load backup from database: Instance backup not found" ; then
+  if ! lxc query -X POST /1.0/containers/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance backup not found" ; then
     echo "invalid rename response for missing backup"
     false
   fi
@@ -773,6 +782,10 @@ test_backup_volume_export_with_project() {
 
   rm -rf "${LXD_DIR}/non-optimized/"*
 
+  old_uuid="$(lxc storage volume get "${custom_vol_pool}" testvol volatile.uuid)"
+  old_snap0_uuid="$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap0 volatile.uuid)"
+  old_snap1_uuid="$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap1 volatile.uuid)"
+
   # Test non-optimized import.
   lxc stop -f c1
   lxc storage volume detach "${custom_vol_pool}" testvol c1
@@ -783,6 +796,14 @@ test_backup_volume_export_with_project() {
   lxc storage volume show "${custom_vol_pool}" testvol/test-snap0
   lxc storage volume get "${custom_vol_pool}" testvol/test-snap0 user.foo | grep -Fx "test-snap0"
   lxc storage volume get "${custom_vol_pool}" testvol/test-snap1 user.foo | grep -Fx "test-snap1"
+
+  # Check if the imported volume and its snapshots have a new UUID.
+  [ -n "$(lxc storage volume get "${custom_vol_pool}" testvol volatile.uuid)" ]
+  [ -n "$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap0 volatile.uuid)" ]
+  [ -n "$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap1 volatile.uuid)" ]
+  [ "$(lxc storage volume get "${custom_vol_pool}" testvol volatile.uuid)" != "${old_uuid}" ]
+  [ "$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap0 volatile.uuid)" != "${old_snap0_uuid}" ]
+  [ "$(lxc storage volume get "${custom_vol_pool}" testvol/test-snap1 volatile.uuid)" != "${old_snap1_uuid}" ]
 
   lxc storage volume import "${custom_vol_pool}" "${LXD_DIR}/testvol.tar.gz" testvol2
   lxc storage volume attach "${custom_vol_pool}" testvol c1 /mnt
@@ -969,7 +990,7 @@ test_backup_export_import_recover() {
     # Create and export an instance.
     lxc launch testimage c1
     lxc export c1 "${LXD_DIR}/c1.tar.gz"
-    lxc rm -f c1
+    lxc delete -f c1
 
     # Import instance and remove no longer required tarball.
     lxc import "${LXD_DIR}/c1.tar.gz" c2
@@ -989,4 +1010,28 @@ EOF
     # Remove recovered instance.
     lxc rm -f c2
   )
+}
+
+test_backup_export_import_instance_only() {
+  poolName=$(lxc profile device get default root pool)
+
+  ensure_import_testimage
+  ensure_has_localhost_remote "${LXD_ADDR}"
+
+  # Create an instance with snapshot.
+  lxc init testimage c1
+  lxc snapshot c1
+
+  # Export the instance and remove it.
+  lxc export c1 "${LXD_DIR}/c1.tar.gz" --instance-only
+  lxc delete -f c1
+
+  # Import the instance from tarball.
+  lxc import "${LXD_DIR}/c1.tar.gz"
+
+  # Verify imported instance has no snapshots.
+  [ "$(lxc query "/1.0/storage-pools/${poolName}/volumes/container/c1/snapshots" | jq "length == 0")" = "true" ]
+
+  rm "${LXD_DIR}/c1.tar.gz"
+  lxc delete -f c1
 }

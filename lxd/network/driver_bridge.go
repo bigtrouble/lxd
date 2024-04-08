@@ -17,7 +17,7 @@ import (
 
 	"github.com/mdlayher/netx/eui64"
 
-	"github.com/canonical/lxd/client"
+	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/apparmor"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/cluster/request"
@@ -28,17 +28,19 @@ import (
 	"github.com/canonical/lxd/lxd/dnsmasq"
 	"github.com/canonical/lxd/lxd/dnsmasq/dhcpalloc"
 	firewallDrivers "github.com/canonical/lxd/lxd/firewall/drivers"
+	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/ip"
 	"github.com/canonical/lxd/lxd/network/acl"
 	"github.com/canonical/lxd/lxd/network/openvswitch"
 	"github.com/canonical/lxd/lxd/project"
-	"github.com/canonical/lxd/lxd/revert"
+	"github.com/canonical/lxd/lxd/subprocess"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/lxd/warnings"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
-	"github.com/canonical/lxd/shared/subprocess"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/validate"
 	"github.com/canonical/lxd/shared/version"
 )
@@ -64,7 +66,7 @@ func (n *bridge) DBType() db.NetworkType {
 	return db.NetworkTypeBridge
 }
 
-// Config returns the network driver info.
+// Info returns the network driver info.
 func (n *bridge) Info() Info {
 	info := n.common.Info()
 	info.AddressForwards = true
@@ -195,10 +197,66 @@ func (n *bridge) ValidateName(name string) error {
 func (n *bridge) Validate(config map[string]string) error {
 	// Build driver specific rules dynamically.
 	rules := map[string]func(value string) error{
-		"bgp.ipv4.nexthop": validate.Optional(validate.IsNetworkAddressV4),
-		"bgp.ipv6.nexthop": validate.Optional(validate.IsNetworkAddressV6),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.peers.NAME.address)
+		//
+		// ---
+		//  type: string
+		//  condition: BGP server
+		//  shortdesc: Peer address (IPv4 or IPv6)
 
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.peers.NAME.asn)
+		//
+		// ---
+		//  type: integer
+		//  condition: BGP server
+		//  shortdesc: Peer AS number
+
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.peers.NAME.password)
+		//
+		// ---
+		//  type: string
+		//  condition: BGP server
+		//  defaultdesc: (no password)
+		//  required: no
+		//  shortdesc: Peer session password
+
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.peers.NAME.holdtime)
+		// Specify the hold time in seconds.
+		// ---
+		//  type: integer
+		//  condition: BGP server
+		//  defaultdesc: `180`
+		//  required: no
+		//  shortdesc: Peer session hold time
+
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.ipv4.nexthop)
+		//
+		// ---
+		//  type: string
+		//  condition: BGP server
+		//  defaultdesc: local address
+		//  shortdesc: Override the IPv4 next-hop for advertised prefixes
+		"bgp.ipv4.nexthop": validate.Optional(validate.IsNetworkAddressV4),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bgp.ipv6.nexthop)
+		//
+		// ---
+		//  type: string
+		//  condition: BGP server
+		//  defaultdesc: local address
+		//  shortdesc: Override the IPv6 next-hop for advertised prefixes
+		"bgp.ipv6.nexthop": validate.Optional(validate.IsNetworkAddressV6),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bridge.driver)
+		// Possible values are `native` and `openvswitch`.
+		// ---
+		//  type: string
+		//  defaultdesc: `native`
+		//  shortdesc: Bridge driver
 		"bridge.driver": validate.Optional(validate.IsOneOf("native", "openvswitch")),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bridge.external_interfaces)
+		// Specify a comma-separated list of unconfigured network interfaces to include in the bridge.
+		// ---
+		//  type: string
+		//  shortdesc: Unconfigured network interfaces to include in the bridge
 		"bridge.external_interfaces": validate.Optional(func(value string) error {
 			for _, entry := range strings.Split(value, ",") {
 				entry = strings.TrimSpace(entry)
@@ -210,11 +268,43 @@ func (n *bridge) Validate(config map[string]string) error {
 
 			return nil
 		}),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bridge.hwaddr)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: MAC address for the bridge
 		"bridge.hwaddr": validate.Optional(validate.IsNetworkMAC),
-		"bridge.mtu":    validate.Optional(validate.IsNetworkMTU),
-		"bridge.mode":   validate.Optional(validate.IsOneOf("standard", "fan")),
-
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bridge.mtu)
+		// The default value varies depending on whether the bridge uses a tunnel or a fan setup.
+		// ---
+		//  type: integer
+		//  defaultdesc: `1500` if `bridge.mode=standard`, `1480` if `bridge.mode=fan` and `fan.type=ipip`, or `1450` if `bridge.mode=fan` and `fan.type=vxlan`
+		//  shortdesc: Bridge MTU
+		"bridge.mtu": validate.Optional(validate.IsNetworkMTU),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=bridge.mode)
+		// Possible values are `standard` and `fan`.
+		// ---
+		//  type: string
+		//  defaultdesc: `standard`
+		//  shortdesc: Bridge operation mode
+		"bridge.mode": validate.Optional(validate.IsOneOf("standard", "fan")),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=fan.overlay_subnet)
+		// Use CIDR notation.
+		// ---
+		//  type: string
+		//  condition: fan mode
+		//  defaultdesc: `240.0.0.0/8`
+		//  shortdesc: Subnet to use as the overlay for the FAN
 		"fan.overlay_subnet": validate.Optional(validate.IsNetworkV4),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=fan.underlay_subnet)
+		// Use CIDR notation.
+		//
+		// You can set the option to `auto` to use the default gateway subnet.
+		// ---
+		//  type: string
+		//  condition: fan mode
+		//  defaultdesc: initial value on creation: `auto`
+		//  shortdesc: Subnet to use as the underlay for the FAN
 		"fan.underlay_subnet": validate.Optional(func(value string) error {
 			if value == "auto" {
 				return nil
@@ -222,8 +312,23 @@ func (n *bridge) Validate(config map[string]string) error {
 
 			return validate.IsNetworkV4(value)
 		}),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=fan.type)
+		// Possible values are `vxlan` and `ipip`.
+		// ---
+		//  type: string
+		//  condition: fan mode
+		//  defaultdesc: `vxlan`
+		//  shortdesc: Tunneling type for the FAN
 		"fan.type": validate.Optional(validate.IsOneOf("vxlan", "ipip")),
-
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.address)
+		// Use CIDR notation.
+		//
+		// You can set the option to `none` to turn off IPv4, or to `auto` to generate a new random unused subnet.
+		// ---
+		//  type: string
+		//  condition: standard mode
+		//  defaultdesc: initial value on creation: `auto`
+		//  shortdesc: IPv4 address for the bridge
 		"ipv4.address": validate.Optional(func(value string) error {
 			if validate.IsOneOf("none", "auto")(value) == nil {
 				return nil
@@ -231,18 +336,99 @@ func (n *bridge) Validate(config map[string]string) error {
 
 			return validate.IsNetworkAddressCIDRV4(value)
 		}),
-		"ipv4.firewall":     validate.Optional(validate.IsBool),
-		"ipv4.nat":          validate.Optional(validate.IsBool),
-		"ipv4.nat.order":    validate.Optional(validate.IsOneOf("before", "after")),
-		"ipv4.nat.address":  validate.Optional(validate.IsNetworkAddressV4),
-		"ipv4.dhcp":         validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.firewall)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv4 address
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to generate filtering firewall rules for this network
+		"ipv4.firewall": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.nat)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv4 address
+		//  defaultdesc: `false` (initial value on creation if `ipv4.address` is set to `auto`: `true`)
+		//  shortdesc: Whether to use NAT for IPv4
+		"ipv4.nat": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.nat.order)
+		// Set this option to `before` to add the NAT rules before any pre-existing rules, or to `after` to add them after the pre-existing rules.
+		// ---
+		//  type: string
+		//  condition: IPv4 address
+		//  defaultdesc: `before`
+		//  shortdesc: Where to add the required NAT rules
+		"ipv4.nat.order": validate.Optional(validate.IsOneOf("before", "after")),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.nat.address)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv4 address
+		//  shortdesc: Source address used for outbound traffic from the bridge
+		"ipv4.nat.address": validate.Optional(validate.IsNetworkAddressV4),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.dhcp)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv4 address
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to allocate IPv4 addresses using DHCP
+		"ipv4.dhcp": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.dhcp.gateway)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv4 DHCP
+		//  defaultdesc: IPv4 address
+		//  shortdesc: Address of the gateway for the IPv4 subnet
 		"ipv4.dhcp.gateway": validate.Optional(validate.IsNetworkAddressV4),
-		"ipv4.dhcp.expiry":  validate.IsAny,
-		"ipv4.dhcp.ranges":  validate.Optional(validate.IsListOf(validate.IsNetworkRangeV4)),
-		"ipv4.routes":       validate.Optional(validate.IsListOf(validate.IsNetworkV4)),
-		"ipv4.routing":      validate.Optional(validate.IsBool),
-		"ipv4.ovn.ranges":   validate.Optional(validate.IsListOf(validate.IsNetworkRangeV4)),
-
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.dhcp.expiry)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv4 DHCP
+		//  defaultdesc: `1h`
+		//  shortdesc: When to expire DHCP leases
+		"ipv4.dhcp.expiry": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.dhcp.ranges)
+		// Specify a comma-separated list of IPv4 ranges in FIRST-LAST format.
+		// ---
+		//  type: string
+		//  condition: IPv4 DHCP
+		//  defaultdesc: all addresses
+		//  shortdesc: IPv4 ranges to use for DHCP
+		"ipv4.dhcp.ranges": validate.Optional(validate.IsListOf(validate.IsNetworkRangeV4)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.routes)
+		// Specify a comma-separated list of IPv4 CIDR subnets.
+		// ---
+		//  type: string
+		//  condition: IPv4 address
+		//  shortdesc: Additional IPv4 CIDR subnets to route to the bridge
+		"ipv4.routes": validate.Optional(validate.IsListOf(validate.IsNetworkV4)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.routing)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv4 address
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to route IPv4 traffic in and out of the bridge
+		"ipv4.routing": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv4.ovn.ranges)
+		// Specify a comma-separated list of IPv4 ranges in FIRST-LAST format.
+		// ---
+		//  type: string
+		//  shortdesc: IPv4 ranges to use for child OVN network routers
+		"ipv4.ovn.ranges": validate.Optional(validate.IsListOf(validate.IsNetworkRangeV4)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.address)
+		// Use CIDR notation.
+		//
+		// You can set the option to `none` to turn off IPv6, or to `auto` to generate a new random unused subnet.
+		// ---
+		//  type: string
+		//  condition: standard mode
+		//  defaultdesc: initial value on creation: `auto`
+		//  shortdesc: IPv6 address for the bridge
 		"ipv6.address": validate.Optional(func(value string) error {
 			if validate.IsOneOf("none", "auto")(value) == nil {
 				return nil
@@ -250,31 +436,197 @@ func (n *bridge) Validate(config map[string]string) error {
 
 			return validate.IsNetworkAddressCIDRV6(value)
 		}),
-		"ipv6.firewall":                        validate.Optional(validate.IsBool),
-		"ipv6.nat":                             validate.Optional(validate.IsBool),
-		"ipv6.nat.order":                       validate.Optional(validate.IsOneOf("before", "after")),
-		"ipv6.nat.address":                     validate.Optional(validate.IsNetworkAddressV6),
-		"ipv6.dhcp":                            validate.Optional(validate.IsBool),
-		"ipv6.dhcp.expiry":                     validate.IsAny,
-		"ipv6.dhcp.stateful":                   validate.Optional(validate.IsBool),
-		"ipv6.dhcp.ranges":                     validate.Optional(validate.IsListOf(validate.IsNetworkRangeV6)),
-		"ipv6.routes":                          validate.Optional(validate.IsListOf(validate.IsNetworkV6)),
-		"ipv6.routing":                         validate.Optional(validate.IsBool),
-		"ipv6.ovn.ranges":                      validate.Optional(validate.IsListOf(validate.IsNetworkRangeV6)),
-		"dns.domain":                           validate.IsAny,
-		"dns.mode":                             validate.Optional(validate.IsOneOf("dynamic", "managed", "none")),
-		"dns.search":                           validate.IsAny,
-		"dns.zone.forward":                     validate.IsAny,
-		"dns.zone.reverse.ipv4":                validate.IsAny,
-		"dns.zone.reverse.ipv6":                validate.IsAny,
-		"raw.dnsmasq":                          validate.IsAny,
-		"maas.subnet.ipv4":                     validate.IsAny,
-		"maas.subnet.ipv6":                     validate.IsAny,
-		"security.acls":                        validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.firewall)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv6 DHCP
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to generate filtering firewall rules for this network
+		"ipv6.firewall": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.nat)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv6 address
+		//  defaultdesc: `false` (initial value on creation if `ipv6.address` is set to `auto`: `true`)
+		//  shortdesc: Whether to use NAT for IPv6
+		"ipv6.nat": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.nat.order)
+		// Set this option to `before` to add the NAT rules before any pre-existing rules, or to `after` to add them after the pre-existing rules.
+		// ---
+		//  type: string
+		//  condition: IPv6 address
+		//  defaultdesc: `before`
+		//  shortdesc: Where to add the required NAT rules
+		"ipv6.nat.order": validate.Optional(validate.IsOneOf("before", "after")),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.nat.address)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv6 address
+		//  shortdesc: Source address used for outbound traffic from the bridge
+		"ipv6.nat.address": validate.Optional(validate.IsNetworkAddressV6),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.dhcp)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv6 address
+		//  defaultdesc: `true`
+		//  shortdesc: Whether to provide additional network configuration over DHCP
+		"ipv6.dhcp": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.dhcp.expiry)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv6 DHCP
+		//  defaultdesc: `1h`
+		//  shortdesc: When to expire DHCP leases
+		"ipv6.dhcp.expiry": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.dhcp.stateful)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv6 DHCP
+		//  defaultdesc: `false`
+		//  shortdesc: Whether to allocate IPv6 addresses using DHCP
+		"ipv6.dhcp.stateful": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.dhcp.ranges)
+		// Specify a comma-separated list of IPv6 ranges in FIRST-LAST format.
+		// ---
+		//  type: string
+		//  condition: IPv6 stateful DHCP
+		//  defaultdesc: all addresses
+		//  shortdesc: IPv6 ranges to use for DHCP
+		"ipv6.dhcp.ranges": validate.Optional(validate.IsListOf(validate.IsNetworkRangeV6)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.routes)
+		// Specify a comma-separated list of IPv6 CIDR subnets.
+		// ---
+		//  type: string
+		//  condition: IPv6 address
+		//  shortdesc: Additional IPv6 CIDR subnets to route to the bridge
+		"ipv6.routes": validate.Optional(validate.IsListOf(validate.IsNetworkV6)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.routing)
+		//
+		// ---
+		//  type: bool
+		//  condition: IPv6 address
+		//  shortdesc: `true`
+		//  shortdesc: Whether to route IPv6 traffic in and out of the bridge
+		"ipv6.routing": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=ipv6.ovn.ranges)
+		// Specify a comma-separated list of IPv6 ranges in FIRST-LAST format.
+		// ---
+		//  type: string
+		//  shortdesc: IPv6 ranges to use for child OVN network routers
+		"ipv6.ovn.ranges": validate.Optional(validate.IsListOf(validate.IsNetworkRangeV6)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.domain)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `lxd`
+		//  shortdesc: Domain to advertise to DHCP clients and use for DNS resolution
+		"dns.domain": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.mode)
+		// Possible values are `none` for no DNS record, `managed` for LXD-generated static records, and `dynamic` for client-generated records.
+		// ---
+		//  type: string
+		//  defaultdesc: `managed`
+		//  shortdesc: DNS registration mode
+		"dns.mode": validate.Optional(validate.IsOneOf("dynamic", "managed", "none")),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.search)
+		// Specify a comma-separated list of domains.
+		// ---
+		//  type: string
+		//  defaultdesc: `dns.domain` value
+		//  shortdesc: Full domain search list
+		"dns.search": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.zone.forward)
+		// Specify a comma-separated list of DNS zone names.
+		// ---
+		//  type: string
+		//  shortdesc: DNS zone names for forward DNS records
+		"dns.zone.forward": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.zone.reverse.ipv4)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: DNS zone name for IPv4 reverse DNS records
+		"dns.zone.reverse.ipv4": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=dns.zone.reverse.ipv6)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: DNS zone name for IPv6 reverse DNS records
+		"dns.zone.reverse.ipv6": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=raw.dnsmasq)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: Additional `dnsmasq` configuration to append to the configuration file
+		"raw.dnsmasq": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=maas.subnet.ipv4)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv4 address; using the `network` property on the NIC
+		//  shortdesc: `true`
+		//  shortdesc: MAAS IPv4 subnet to register instances in
+		"maas.subnet.ipv4": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=maas.subnet.ipv6)
+		//
+		// ---
+		//  type: string
+		//  condition: IPv6 address; using the `network` property on the NIC
+		//  shortdesc: `true`
+		//  shortdesc: MAAS IPv6 subnet to register instances in
+		"maas.subnet.ipv6": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=security.acls)
+		// Specify a comma-separated list of network ACLs.
+		//
+		// Also see {ref}`network-acls-bridge-limitations`.
+		// ---
+		//  type: string
+		//  shortdesc: Network ACLs to apply to NICs connected to this network
+		"security.acls": validate.IsAny,
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=security.acls.default.ingress.action)
+		// The specified action is used for all ingress traffic that doesn’t match any ACL rule.
+		// ---
+		//  type: string
+		//  condition: `security.acls`
+		//  shortdesc: `reject`
+		//  shortdesc: Default action to use for ingress traffic
 		"security.acls.default.ingress.action": validate.Optional(validate.IsOneOf(acl.ValidActions...)),
-		"security.acls.default.egress.action":  validate.Optional(validate.IsOneOf(acl.ValidActions...)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=security.acls.default.egress.action)
+		// The specified action is used for all egress traffic that doesn’t match any ACL rule.
+		// ---
+		//  type: string
+		//  condition: `security.acls`
+		//  shortdesc: `reject`
+		//  shortdesc: Default action to use for egress traffic
+		"security.acls.default.egress.action": validate.Optional(validate.IsOneOf(acl.ValidActions...)),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=security.acls.default.ingress.logged)
+		//
+		// ---
+		//  type: bool
+		//  condition: `security.acls`
+		//  shortdesc: `false`
+		//  shortdesc: Whether to log ingress traffic that doesn’t match any ACL rule
 		"security.acls.default.ingress.logged": validate.Optional(validate.IsBool),
-		"security.acls.default.egress.logged":  validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=security.acls.default.egress.logged)
+		//
+		// ---
+		//  type: bool
+		//  condition: `security.acls`
+		//  shortdesc: `false`
+		//  shortdesc: Whether to log egress traffic that doesn’t match any ACL rule
+		"security.acls.default.egress.logged": validate.Optional(validate.IsBool),
+
+		// lxdmeta:generate(entities=network-bridge; group=network-conf; key=user.*)
+		//
+		// ---
+		//  type: string
+		//  shortdesc: User-provided free-form key/value pairs
 	}
 
 	// Add dynamic validation rules.
@@ -296,20 +648,74 @@ func (n *bridge) Validate(config map[string]string) error {
 			// Add the correct validation rule for the dynamic field based on last part of key.
 			switch tunnelKey {
 			case "protocol":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.protocol)
+				// Possible values are `vxlan` and `gre`.
+				// ---
+				//  type: string
+				//  condition: standard mode
+				//  shortdesc: Tunneling protocol
 				rules[k] = validate.Optional(validate.IsOneOf("gre", "vxlan"))
 			case "local":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.local)
+				//
+				// ---
+				//  type: string
+				//  condition: `gre` or `vxlan`
+				//  required: not required for multicast `vxlan`
+				//  shortdesc: Local address for the tunnel
 				rules[k] = validate.Optional(validate.IsNetworkAddress)
 			case "remote":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.remote)
+				//
+				// ---
+				//  type: string
+				//  condition: `gre` or `vxlan`
+				//  required: not required for multicast `vxlan`
+				//  shortdesc: Remote address for the tunnel
 				rules[k] = validate.Optional(validate.IsNetworkAddress)
 			case "port":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.port)
+				//
+				// ---
+				//  type: integer
+				//  condition: `vxlan`
+				//  defaultdesc: `0`
+				//  shortdesc: Specific port to use for the `vxlan` tunnel
 				rules[k] = networkValidPort
 			case "group":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.group)
+				// This address is used if {config:option}`network-bridge-network-conf:tunnel.NAME.local` and {config:option}`network-bridge-network-conf:tunnel.NAME.remote` aren’t set.
+				// ---
+				//  type: string
+				//  condition: `vxlan`
+				//  shortdesc: `239.0.0.1`
+				//  shortdesc: Multicast address for `vxlan`
 				rules[k] = validate.Optional(validate.IsNetworkAddress)
 			case "id":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.id)
+				//
+				// ---
+				//  type: integer
+				//  condition: `vxlan`
+				//  shortdesc: `0`
+				//  shortdesc: Specific tunnel ID to use for the `vxlan` tunnel
 				rules[k] = validate.Optional(validate.IsInt64)
 			case "interface":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.interface)
+				//
+				// ---
+				//  type: string
+				//  condition: `vxlan`
+				//  shortdesc: Specific host interface to use for the tunnel
 				rules[k] = validate.IsInterfaceName
 			case "ttl":
+				// lxdmeta:generate(entities=network-bridge; group=network-conf; key=tunnel.NAME.ttl)
+				//
+				// ---
+				//  type: string
+				//  condition: `vxlan`
+				//  defaultdesc: `1`
+				//  shortdesc: Specific TTL to use for multicast routing topologies
 				rules[k] = validate.Optional(validate.IsUint8)
 			}
 		}
@@ -412,19 +818,19 @@ func (n *bridge) Validate(config map[string]string) error {
 			allowedNets = append(allowedNets, dhcpSubnet)
 		}
 
-		ovnRanges, err := parseIPRanges(config["ipv4.ovn.ranges"], allowedNets...)
+		ovnRanges, err := shared.ParseIPRanges(config["ipv4.ovn.ranges"], allowedNets...)
 		if err != nil {
 			return fmt.Errorf("Failed parsing ipv4.ovn.ranges: %w", err)
 		}
 
-		dhcpRanges, err := parseIPRanges(config["ipv4.dhcp.ranges"], allowedNets...)
+		dhcpRanges, err := shared.ParseIPRanges(config["ipv4.dhcp.ranges"], allowedNets...)
 		if err != nil {
 			return fmt.Errorf("Failed parsing ipv4.dhcp.ranges: %w", err)
 		}
 
 		for _, ovnRange := range ovnRanges {
 			for _, dhcpRange := range dhcpRanges {
-				if IPRangesOverlap(ovnRange, dhcpRange) {
+				if ovnRange.Overlaps(dhcpRange) {
 					return fmt.Errorf(`The range specified in "ipv4.ovn.ranges" (%q) cannot overlap with "ipv4.dhcp.ranges"`, ovnRange)
 				}
 			}
@@ -444,7 +850,7 @@ func (n *bridge) Validate(config map[string]string) error {
 			allowedNets = append(allowedNets, dhcpSubnet)
 		}
 
-		ovnRanges, err := parseIPRanges(config["ipv6.ovn.ranges"], allowedNets...)
+		ovnRanges, err := shared.ParseIPRanges(config["ipv6.ovn.ranges"], allowedNets...)
 		if err != nil {
 			return fmt.Errorf("Failed parsing ipv6.ovn.ranges: %w", err)
 		}
@@ -452,14 +858,14 @@ func (n *bridge) Validate(config map[string]string) error {
 		// If stateful DHCPv6 is enabled, check OVN ranges don't overlap with DHCPv6 stateful ranges.
 		// Otherwise SLAAC will be being used to generate client IPs and predefined ranges aren't used.
 		if dhcpSubnet != nil && shared.IsTrue(config["ipv6.dhcp.stateful"]) {
-			dhcpRanges, err := parseIPRanges(config["ipv6.dhcp.ranges"], allowedNets...)
+			dhcpRanges, err := shared.ParseIPRanges(config["ipv6.dhcp.ranges"], allowedNets...)
 			if err != nil {
 				return fmt.Errorf("Failed parsing ipv6.dhcp.ranges: %w", err)
 			}
 
 			for _, ovnRange := range ovnRanges {
 				for _, dhcpRange := range dhcpRanges {
-					if IPRangesOverlap(ovnRange, dhcpRange) {
+					if ovnRange.Overlaps(dhcpRange) {
 						return fmt.Errorf(`The range specified in "ipv6.ovn.ranges" (%q) cannot overlap with "ipv6.dhcp.ranges"`, ovnRange)
 					}
 				}
@@ -1008,7 +1414,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 
 		// Configure NAT.
 		if shared.IsTrue(n.config["ipv4.nat"]) {
-			//If a SNAT source address is specified, use that, otherwise default to MASQUERADE mode.
+			// If a SNAT source address is specified, use that, otherwise default to MASQUERADE mode.
 			var srcIP net.IP
 			if n.config["ipv4.nat.address"] != "" {
 				srcIP = net.ParseIP(n.config["ipv4.nat.address"])
@@ -1094,13 +1500,14 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 
 		if subnetSize > 64 {
 			n.logger.Warn("IPv6 networks with a prefix larger than 64 aren't properly supported by dnsmasq")
-
-			err = n.state.DB.Cluster.UpsertWarningLocalNode(n.project, dbCluster.TypeNetwork, int(n.id), warningtype.LargerIPv6PrefixThanSupported, "")
+			err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				return tx.UpsertWarningLocalNode(ctx, n.project, entity.TypeNetwork, int(n.id), warningtype.LargerIPv6PrefixThanSupported, "")
+			})
 			if err != nil {
 				n.logger.Warn("Failed to create warning", logger.Ctx{"err": err})
 			}
 		} else {
-			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.LargerIPv6PrefixThanSupported, dbCluster.TypeNetwork, int(n.id))
+			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.LargerIPv6PrefixThanSupported, entity.TypeNetwork, int(n.id))
 			if err != nil {
 				n.logger.Warn("Failed to resolve warning", logger.Ctx{"err": err})
 			}
@@ -1147,13 +1554,21 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 				return err
 			}
 
-			// First set accept_ra to 2 for everything.
+			// First set accept_ra to 2 for all interfaces (if not disabled).
+			// This ensures that the host can still receive IPv6 router advertisements even with
+			// forwarding enabled (which enable below), as the default is to ignore router adverts
+			// when forward is enabled, and this could render the host unreachable if it uses
+			// SLAAC generated IPs.
 			for _, entry := range entries {
+				// Check that IPv6 router advertisement acceptance is enabled currently.
+				// If its set to 0 then we don't want to enable, and if its already set to 2 then
+				// we don't need to do anything.
 				content, err := os.ReadFile(fmt.Sprintf("/proc/sys/net/ipv6/conf/%s/accept_ra", entry.Name()))
 				if err == nil && string(content) != "1\n" {
 					continue
 				}
 
+				// If IPv6 router acceptance is enabled (set to 1) then we now set it to 2.
 				err = util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", entry.Name()), "2")
 				if err != nil && !os.IsNotExist(err) {
 					return err
@@ -1187,7 +1602,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 
 		// Configure NAT.
 		if shared.IsTrue(n.config["ipv6.nat"]) {
-			//If a SNAT source address is specified, use that, otherwise default to MASQUERADE mode.
+			// If a SNAT source address is specified, use that, otherwise default to MASQUERADE mode.
 			var srcIP net.IP
 			if n.config["ipv6.nat.address"] != "" {
 				srcIP = net.ParseIP(n.config["ipv6.nat.address"])
@@ -1614,14 +2029,16 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 		if n.config["raw.dnsmasq"] == "" {
 			p.SetApparmor(apparmor.DnsmasqProfileName(n))
 
-			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.AppArmorDisabledDueToRawDnsmasq, dbCluster.TypeNetwork, int(n.id))
+			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.AppArmorDisabledDueToRawDnsmasq, entity.TypeNetwork, int(n.id))
 			if err != nil {
 				n.logger.Warn("Failed to resolve warning", logger.Ctx{"err": err})
 			}
 		} else {
 			n.logger.Warn("Skipping AppArmor for dnsmasq due to raw.dnsmasq being set", logger.Ctx{"name": n.name})
 
-			err = n.state.DB.Cluster.UpsertWarningLocalNode(n.project, dbCluster.TypeNetwork, int(n.id), warningtype.AppArmorDisabledDueToRawDnsmasq, "")
+			err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				return tx.UpsertWarningLocalNode(ctx, n.project, entity.TypeNetwork, int(n.id), warningtype.AppArmorDisabledDueToRawDnsmasq, "")
+			})
 			if err != nil {
 				n.logger.Warn("Failed to create warning", logger.Ctx{"err": err})
 			}
@@ -2108,7 +2525,7 @@ func (n *bridge) applyBootRoutesV6(routes []string) {
 	}
 }
 
-func (n *bridge) fanAddress(underlay *net.IPNet, overlay *net.IPNet) (string, string, string, error) {
+func (n *bridge) fanAddress(underlay *net.IPNet, overlay *net.IPNet) (cidr string, dev string, ipStr string, err error) {
 	// Quick checks.
 	underlaySize, _ := underlay.Mask.Size()
 	if underlaySize != 16 && underlaySize != 24 {
@@ -2130,7 +2547,7 @@ func (n *bridge) fanAddress(underlay *net.IPNet, overlay *net.IPNet) (string, st
 		return "", "", "", err
 	}
 
-	ipStr := ip.String()
+	ipStr = ip.String()
 
 	// Force into IPv4 format
 	ipBytes := ip.To4()
@@ -2461,52 +2878,54 @@ func (n *bridge) bridgeNetworkExternalSubnets(bridgeProjectNetworks map[string][
 func (n *bridge) bridgedNICExternalRoutes(bridgeProjectNetworks map[string][]*api.Network) ([]externalSubnetUsage, error) {
 	externalRoutes := make([]externalSubnetUsage, 0)
 
-	err := n.state.DB.Cluster.InstanceList(context.TODO(), func(inst db.InstanceArgs, p api.Project) error {
-		// Get the instance's effective network project name.
-		instNetworkProject := project.NetworkProjectFromRecord(&p)
+	err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(inst db.InstanceArgs, p api.Project) error {
+			// Get the instance's effective network project name.
+			instNetworkProject := project.NetworkProjectFromRecord(&p)
 
-		if instNetworkProject != project.Default {
-			return nil // Managed bridge networks can only exist in default project.
-		}
-
-		devices := db.ExpandInstanceDevices(inst.Devices, inst.Profiles)
-
-		// Iterate through each of the instance's devices, looking for bridged NICs that are linked to
-		// networks specified.
-		for devName, devConfig := range devices {
-			if devConfig["type"] != "nic" {
-				continue
+			if instNetworkProject != api.ProjectDefaultName {
+				return nil // Managed bridge networks can only exist in default project.
 			}
 
-			// Check whether the NIC device references one of the networks supplied.
-			if !NICUsesNetwork(devConfig, bridgeProjectNetworks[instNetworkProject]...) {
-				continue
-			}
+			devices := instancetype.ExpandInstanceDevices(inst.Devices, inst.Profiles)
 
-			// For bridged NICs that are connected to networks specified, check if they have any
-			// routes or external routes configured, and if so add them to the list to return.
-			for _, key := range []string{"ipv4.routes", "ipv6.routes", "ipv4.routes.external", "ipv6.routes.external"} {
-				for _, cidr := range shared.SplitNTrimSpace(devConfig[key], ",", -1, true) {
-					_, ipNet, _ := net.ParseCIDR(cidr)
-					if ipNet == nil {
-						// Skip if NIC device doesn't have a valid route.
-						continue
+			// Iterate through each of the instance's devices, looking for bridged NICs that are linked to
+			// networks specified.
+			for devName, devConfig := range devices {
+				if devConfig["type"] != "nic" {
+					continue
+				}
+
+				// Check whether the NIC device references one of the networks supplied.
+				if !NICUsesNetwork(devConfig, bridgeProjectNetworks[instNetworkProject]...) {
+					continue
+				}
+
+				// For bridged NICs that are connected to networks specified, check if they have any
+				// routes or external routes configured, and if so add them to the list to return.
+				for _, key := range []string{"ipv4.routes", "ipv6.routes", "ipv4.routes.external", "ipv6.routes.external"} {
+					for _, cidr := range shared.SplitNTrimSpace(devConfig[key], ",", -1, true) {
+						_, ipNet, _ := net.ParseCIDR(cidr)
+						if ipNet == nil {
+							// Skip if NIC device doesn't have a valid route.
+							continue
+						}
+
+						externalRoutes = append(externalRoutes, externalSubnetUsage{
+							subnet:          *ipNet,
+							networkProject:  instNetworkProject,
+							networkName:     devConfig["network"],
+							instanceProject: inst.Project,
+							instanceName:    inst.Name,
+							instanceDevice:  devName,
+							usageType:       subnetUsageInstance,
+						})
 					}
-
-					externalRoutes = append(externalRoutes, externalSubnetUsage{
-						subnet:          *ipNet,
-						networkProject:  instNetworkProject,
-						networkName:     devConfig["network"],
-						instanceProject: inst.Project,
-						instanceName:    inst.Name,
-						instanceDevice:  devName,
-						usageType:       subnetUsageInstance,
-					})
 				}
 			}
-		}
 
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -2565,35 +2984,37 @@ func (n *bridge) getExternalSubnetInUse() ([]externalSubnetUsage, error) {
 	externalSubnets = append(externalSubnets, bridgeNetworkExternalSubnets...)
 	externalSubnets = append(externalSubnets, bridgedNICExternalRoutes...)
 
-	// Detect if there are any conflicting proxy devices on all instances with the to be created network forward
-	err = n.state.DB.Cluster.InstanceList(context.TODO(), func(inst db.InstanceArgs, p api.Project) error {
-		devices := db.ExpandInstanceDevices(inst.Devices, inst.Profiles)
+	err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Detect if there are any conflicting proxy devices on all instances with the to be created network forward
+		return tx.InstanceList(ctx, func(inst db.InstanceArgs, p api.Project) error {
+			devices := instancetype.ExpandInstanceDevices(inst.Devices, inst.Profiles)
 
-		for devName, devConfig := range devices {
-			if devConfig["type"] != "proxy" {
-				continue
+			for devName, devConfig := range devices {
+				if devConfig["type"] != "proxy" {
+					continue
+				}
+
+				proxyListenAddr, err := ProxyParseAddr(devConfig["listen"])
+				if err != nil {
+					return err
+				}
+
+				proxySubnet, err := ParseIPToNet(proxyListenAddr.Address)
+				if err != nil {
+					continue // If proxy listen isn't a valid IP it can't conflict.
+				}
+
+				externalSubnets = append(externalSubnets, externalSubnetUsage{
+					usageType:       subnetUsageProxy,
+					subnet:          *proxySubnet,
+					instanceProject: inst.Project,
+					instanceName:    inst.Name,
+					instanceDevice:  devName,
+				})
 			}
 
-			proxyListenAddr, err := ProxyParseAddr(devConfig["listen"])
-			if err != nil {
-				return err
-			}
-
-			proxySubnet, err := ParseIPToNet(proxyListenAddr.Address)
-			if err != nil {
-				return err
-			}
-
-			externalSubnets = append(externalSubnets, externalSubnetUsage{
-				usageType:       subnetUsageProxy,
-				subnet:          *proxySubnet,
-				instanceProject: inst.Project,
-				instanceName:    inst.Name,
-				instanceDevice:  devName,
-			})
-		}
-
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -2629,8 +3050,12 @@ func (n *bridge) getExternalSubnetInUse() ([]externalSubnetUsage, error) {
 func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType request.ClientType) error {
 	memberSpecific := true // bridge supports per-member forwards.
 
-	// Check if there is an existing forward using the same listen address.
-	_, _, err := n.state.DB.Cluster.GetNetworkForward(context.TODO(), n.ID(), memberSpecific, forward.ListenAddress)
+	err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check if there is an existing forward using the same listen address.
+		_, _, err := tx.GetNetworkForward(ctx, n.ID(), memberSpecific, forward.ListenAddress)
+
+		return err
+	})
 	if err == nil {
 		return api.StatusErrorf(http.StatusConflict, "A forward for that listen address already exists")
 	}
@@ -2641,7 +3066,7 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 		return fmt.Errorf("Failed parsing address forward listen address %q: %w", forward.ListenAddress, err)
 	}
 
-	_, err = n.forwardValidate(listenAddressNet.IP, &forward.NetworkForwardPut)
+	_, err = n.forwardValidate(listenAddressNet.IP, forward.NetworkForwardPut)
 	if err != nil {
 		return err
 	}
@@ -2672,14 +3097,22 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 	revert := revert.New()
 	defer revert.Fail()
 
-	// Create forward DB record.
-	forwardID, err := n.state.DB.Cluster.CreateNetworkForward(n.ID(), memberSpecific, &forward)
+	var forwardID int64
+
+	err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Create forward DB record.
+		forwardID, err = tx.CreateNetworkForward(ctx, n.ID(), memberSpecific, &forward)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}
 
 	revert.Add(func() {
-		_ = n.state.DB.Cluster.DeleteNetworkForward(n.ID(), forwardID)
+		_ = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.DeleteNetworkForward(ctx, n.ID(), forwardID)
+		})
 		_ = n.forwardSetupFirewall()
 		_ = n.forwardBGPSetupPrefixes()
 	})
@@ -2704,7 +3137,13 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 		// forward's listener. Without hairpin mode on the target of the forward will not be able to
 		// connect to the listener.
 		if brNetfilterEnabled {
-			listenAddresses, err := n.state.DB.Cluster.GetNetworkForwardListenAddresses(n.ID(), true)
+			var listenAddresses map[int64]string
+
+			err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+				listenAddresses, err = tx.GetNetworkForwardListenAddresses(ctx, n.ID(), true)
+
+				return err
+			})
 			if err != nil {
 				return fmt.Errorf("Failed loading network forwards: %w", err)
 			}
@@ -2712,42 +3151,45 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 			// If we are the first forward on this bridge, enable hairpin mode on active NIC ports.
 			if len(listenAddresses) <= 1 {
 				filter := dbCluster.InstanceFilter{Node: &n.state.ServerName}
-				err = n.state.DB.Cluster.InstanceList(context.TODO(), func(inst db.InstanceArgs, p api.Project) error {
-					// Get the instance's effective network project name.
-					instNetworkProject := project.NetworkProjectFromRecord(&p)
 
-					if instNetworkProject != project.Default {
-						return nil // Managed bridge networks can only exist in default project.
-					}
+				err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+					return tx.InstanceList(ctx, func(inst db.InstanceArgs, p api.Project) error {
+						// Get the instance's effective network project name.
+						instNetworkProject := project.NetworkProjectFromRecord(&p)
 
-					devices := db.ExpandInstanceDevices(inst.Devices.Clone(), inst.Profiles)
-
-					// Iterate through each of the instance's devices, looking for bridged NICs
-					// that are linked to this network.
-					for devName, devConfig := range devices {
-						if devConfig["type"] != "nic" {
-							continue
+						if instNetworkProject != api.ProjectDefaultName {
+							return nil // Managed bridge networks can only exist in default project.
 						}
 
-						// Check whether the NIC device references our network..
-						if !NICUsesNetwork(devConfig, &api.Network{Name: n.Name()}) {
-							continue
-						}
+						devices := instancetype.ExpandInstanceDevices(inst.Devices.Clone(), inst.Profiles)
 
-						hostName := inst.Config[fmt.Sprintf("volatile.%s.host_name", devName)]
-						if InterfaceExists(hostName) {
-							link := &ip.Link{Name: hostName}
-							err = link.BridgeLinkSetHairpin(true)
-							if err != nil {
-								return fmt.Errorf("Error enabling hairpin mode on bridge port %q: %w", link.Name, err)
+						// Iterate through each of the instance's devices, looking for bridged NICs
+						// that are linked to this network.
+						for devName, devConfig := range devices {
+							if devConfig["type"] != "nic" {
+								continue
 							}
 
-							n.logger.Debug("Enabled hairpin mode on NIC bridge port", logger.Ctx{"inst": inst.Name, "project": inst.Project, "device": devName, "dev": link.Name})
-						}
-					}
+							// Check whether the NIC device references our network..
+							if !NICUsesNetwork(devConfig, &api.Network{Name: n.Name()}) {
+								continue
+							}
 
-					return nil
-				}, filter)
+							hostName := inst.Config[fmt.Sprintf("volatile.%s.host_name", devName)]
+							if InterfaceExists(hostName) {
+								link := &ip.Link{Name: hostName}
+								err = link.BridgeLinkSetHairpin(true)
+								if err != nil {
+									return fmt.Errorf("Error enabling hairpin mode on bridge port %q: %w", link.Name, err)
+								}
+
+								n.logger.Debug("Enabled hairpin mode on NIC bridge port", logger.Ctx{"inst": inst.Name, "project": inst.Project, "device": devName, "dev": link.Name})
+							}
+						}
+
+						return nil
+					}, filter)
+				})
 				if err != nil {
 					return err
 				}
@@ -2768,12 +3210,22 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 // ForwardUpdate updates a network forward.
 func (n *bridge) ForwardUpdate(listenAddress string, req api.NetworkForwardPut, clientType request.ClientType) error {
 	memberSpecific := true // bridge supports per-member forwards.
-	curForwardID, curForward, err := n.state.DB.Cluster.GetNetworkForward(context.TODO(), n.ID(), memberSpecific, listenAddress)
+
+	var curForwardID int64
+	var curForward *api.NetworkForward
+
+	err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		curForwardID, curForward, err = tx.GetNetworkForward(ctx, n.ID(), memberSpecific, listenAddress)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}
 
-	_, err = n.forwardValidate(net.ParseIP(curForward.ListenAddress), &req)
+	_, err = n.forwardValidate(net.ParseIP(curForward.ListenAddress), req)
 	if err != nil {
 		return err
 	}
@@ -2784,8 +3236,10 @@ func (n *bridge) ForwardUpdate(listenAddress string, req api.NetworkForwardPut, 
 	}
 
 	newForward := api.NetworkForward{
-		ListenAddress:     curForward.ListenAddress,
-		NetworkForwardPut: req,
+		ListenAddress: curForward.ListenAddress,
+		Description:   req.Description,
+		Config:        req.Config,
+		Ports:         req.Ports,
 	}
 
 	newForwardEtagHash, err := util.EtagHash(newForward.Etag())
@@ -2800,13 +3254,17 @@ func (n *bridge) ForwardUpdate(listenAddress string, req api.NetworkForwardPut, 
 	revert := revert.New()
 	defer revert.Fail()
 
-	err = n.state.DB.Cluster.UpdateNetworkForward(n.ID(), curForwardID, &newForward.NetworkForwardPut)
+	err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.UpdateNetworkForward(ctx, n.ID(), curForwardID, newForward.Writable())
+	})
 	if err != nil {
 		return err
 	}
 
 	revert.Add(func() {
-		_ = n.state.DB.Cluster.UpdateNetworkForward(n.ID(), curForwardID, &curForward.NetworkForwardPut)
+		_ = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.UpdateNetworkForward(ctx, n.ID(), curForwardID, curForward.Writable())
+		})
 		_ = n.forwardSetupFirewall()
 		_ = n.forwardBGPSetupPrefixes()
 	})
@@ -2823,7 +3281,16 @@ func (n *bridge) ForwardUpdate(listenAddress string, req api.NetworkForwardPut, 
 // ForwardDelete deletes a network forward.
 func (n *bridge) ForwardDelete(listenAddress string, clientType request.ClientType) error {
 	memberSpecific := true // bridge supports per-member forwards.
-	forwardID, forward, err := n.state.DB.Cluster.GetNetworkForward(context.TODO(), n.ID(), memberSpecific, listenAddress)
+	var forwardID int64
+	var forward *api.NetworkForward
+
+	err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		forwardID, forward, err = tx.GetNetworkForward(ctx, n.ID(), memberSpecific, listenAddress)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -2831,18 +3298,25 @@ func (n *bridge) ForwardDelete(listenAddress string, clientType request.ClientTy
 	revert := revert.New()
 	defer revert.Fail()
 
-	err = n.state.DB.Cluster.DeleteNetworkForward(n.ID(), forwardID)
+	err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.DeleteNetworkForward(ctx, n.ID(), forwardID)
+	})
 	if err != nil {
 		return err
 	}
 
 	revert.Add(func() {
 		newForward := api.NetworkForwardsPost{
-			NetworkForwardPut: forward.NetworkForwardPut,
+			NetworkForwardPut: forward.Writable(),
 			ListenAddress:     forward.ListenAddress,
 		}
 
-		_, _ = n.state.DB.Cluster.CreateNetworkForward(n.ID(), memberSpecific, &newForward)
+		_ = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			_, _ = tx.CreateNetworkForward(ctx, n.ID(), memberSpecific, &newForward)
+
+			return nil
+		})
+
 		_ = n.forwardSetupFirewall()
 		_ = n.forwardBGPSetupPrefixes()
 	})
@@ -2865,7 +3339,16 @@ func (n *bridge) ForwardDelete(listenAddress string, clientType request.ClientTy
 // forwardSetupFirewall applies all network address forwards defined for this network and this member.
 func (n *bridge) forwardSetupFirewall() error {
 	memberSpecific := true // Get all forwards for this cluster member.
-	forwards, err := n.state.DB.Cluster.GetNetworkForwards(context.TODO(), n.ID(), memberSpecific)
+
+	var forwards map[int64]*api.NetworkForward
+
+	err := n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		forwards, err = tx.GetNetworkForwards(ctx, n.ID(), memberSpecific)
+
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Failed loading network forwards: %w", err)
 	}
@@ -2887,7 +3370,7 @@ func (n *bridge) forwardSetupFirewall() error {
 			ipVersions[4] = struct{}{}
 		}
 
-		portMaps, err := n.forwardValidate(listenAddressNet.IP, &forward.NetworkForwardPut)
+		portMaps, err := n.forwardValidate(listenAddressNet.IP, forward.Writable())
 		if err != nil {
 			return fmt.Errorf("Failed validating firewall address forward for listen address %q: %w", forward.ListenAddress, err)
 		}
@@ -2904,7 +3387,9 @@ func (n *bridge) forwardSetupFirewall() error {
 				brNetfilterWarning = true
 				msg := fmt.Sprintf("IPv%d bridge netfilter not enabled. Instances using the bridge will not be able to connect to the forward listen IPs", ipVersion)
 				n.logger.Warn(msg, logger.Ctx{"err": err})
-				err = n.state.DB.Cluster.UpsertWarningLocalNode(n.project, dbCluster.TypeNetwork, int(n.id), warningtype.ProxyBridgeNetfilterNotEnabled, fmt.Sprintf("%s: %v", msg, err))
+				err = n.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+					return tx.UpsertWarningLocalNode(ctx, n.project, entity.TypeNetwork, int(n.id), warningtype.ProxyBridgeNetfilterNotEnabled, fmt.Sprintf("%s: %v", msg, err))
+				})
 				if err != nil {
 					n.logger.Warn("Failed to create warning", logger.Ctx{"err": err})
 				}
@@ -2912,7 +3397,7 @@ func (n *bridge) forwardSetupFirewall() error {
 		}
 
 		if !brNetfilterWarning {
-			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.ProxyBridgeNetfilterNotEnabled, dbCluster.TypeNetwork, int(n.id))
+			err = warnings.ResolveWarningsByLocalNodeAndProjectAndTypeAndEntity(n.state.DB.Cluster, n.project, warningtype.ProxyBridgeNetfilterNotEnabled, entity.TypeNetwork, int(n.id))
 			if err != nil {
 				n.logger.Warn("Failed to resolve warning", logger.Ctx{"err": err})
 			}

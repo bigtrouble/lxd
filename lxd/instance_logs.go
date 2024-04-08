@@ -10,14 +10,16 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/storage"
 	"github.com/canonical/lxd/shared"
+	"github.com/canonical/lxd/shared/entity"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/version"
 )
 
@@ -29,8 +31,8 @@ var instanceLogCmd = APIEndpoint{
 		{Name: "vmLog", Path: "virtual-machines/{name}/logs/{file}"},
 	},
 
-	Delete: APIEndpointAction{Handler: instanceLogDelete, AccessHandler: allowProjectPermission("containers", "operate-containers")},
-	Get:    APIEndpointAction{Handler: instanceLogGet, AccessHandler: allowProjectPermission("containers", "view")},
+	Delete: APIEndpointAction{Handler: instanceLogDelete, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanEdit, "name")},
+	Get:    APIEndpointAction{Handler: instanceLogGet, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanView, "name")},
 }
 
 var instanceLogsCmd = APIEndpoint{
@@ -41,7 +43,7 @@ var instanceLogsCmd = APIEndpoint{
 		{Name: "vmLogs", Path: "virtual-machines/{name}/logs"},
 	},
 
-	Get: APIEndpointAction{Handler: instanceLogsGet, AccessHandler: allowProjectPermission("containers", "view")},
+	Get: APIEndpointAction{Handler: instanceLogsGet, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanView, "name")},
 }
 
 var instanceExecOutputCmd = APIEndpoint{
@@ -52,8 +54,8 @@ var instanceExecOutputCmd = APIEndpoint{
 		{Name: "vmExecOutput", Path: "virtual-machines/{name}/logs/exec-output/{file}"},
 	},
 
-	Delete: APIEndpointAction{Handler: instanceExecOutputDelete, AccessHandler: allowProjectPermission("containers", "operate-containers")},
-	Get:    APIEndpointAction{Handler: instanceExecOutputGet, AccessHandler: allowProjectPermission("containers", "view")},
+	Delete: APIEndpointAction{Handler: instanceExecOutputDelete, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanExec, "name")},
+	Get:    APIEndpointAction{Handler: instanceExecOutputGet, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanExec, "name")},
 }
 
 var instanceExecOutputsCmd = APIEndpoint{
@@ -64,7 +66,7 @@ var instanceExecOutputsCmd = APIEndpoint{
 		{Name: "vmExecOutputs", Path: "virtual-machines/{name}/logs/exec-output"},
 	},
 
-	Get: APIEndpointAction{Handler: instanceExecOutputsGet, AccessHandler: allowProjectPermission("containers", "view")},
+	Get: APIEndpointAction{Handler: instanceExecOutputsGet, AccessHandler: allowPermission(entity.TypeInstance, auth.EntitlementCanExec, "name")},
 }
 
 // swagger:operation GET /1.0/instances/{name}/logs instances instance_logs_get
@@ -131,7 +133,7 @@ func instanceLogsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -215,7 +217,7 @@ func instanceLogGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -299,7 +301,7 @@ func instanceLogDelete(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -411,7 +413,7 @@ func instanceExecOutputsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -516,7 +518,7 @@ func instanceExecOutputGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)
@@ -616,7 +618,7 @@ func instanceExecOutputDelete(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	projectName := projectParam(r)
+	projectName := request.ProjectParam(r)
 	name, err := url.PathUnescape(mux.Vars(r)["name"])
 	if err != nil {
 		return response.SmartError(err)

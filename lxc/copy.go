@@ -8,6 +8,7 @@ import (
 
 	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxc/config"
+	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	cli "github.com/canonical/lxd/shared/cmd"
@@ -84,19 +85,21 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		return fmt.Errorf(i18n.G("You must specify a source instance name"))
 	}
 
-	// Check that a destination instance was specified, if --target is passed.
-	if destName == "" && c.flagTarget != "" {
-		return fmt.Errorf(i18n.G("You must specify a destination instance name when using --target"))
-	}
-
 	// Don't allow refreshing without profiles.
 	if c.flagRefresh && c.flagNoProfiles {
 		return fmt.Errorf(i18n.G("--no-profiles cannot be used with --refresh"))
 	}
 
-	// If no destination name was provided, use the same as the source
-	if destName == "" && destResource != "" {
-		destName = sourceName
+	// If the instance is being copied to a different remote and no destination name is
+	// specified, use the source name with snapshot suffix trimmed (in case a new instance
+	// is being created from a snapshot).
+	if destName == "" && destResource != "" && c.flagTarget == "" {
+		destName = strings.SplitN(sourceName, shared.SnapshotDelimiter, 2)[0]
+	}
+
+	// Ensure that a destination name is provided.
+	if destName == "" {
+		return fmt.Errorf(i18n.G("You must specify a destination instance name"))
 	}
 
 	// Connect to the source host
@@ -139,7 +142,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		configMap[key] = value
 	}
 
-	deviceMap, err := parseDeviceOverrides(c.flagDevice)
+	deviceOverrides, err := parseDeviceOverrides(c.flagDevice)
 	if err != nil {
 		return err
 	}
@@ -178,21 +181,38 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Profiles = []string{}
 		}
 
-		// Allow setting additional config keys
-		for key, value := range configMap {
-			entry.Config[key] = value
+		// Check to see if any of the overridden devices are for devices that are not yet defined in the
+		// local devices (and thus maybe expected to be coming from profiles).
+		needProfileExpansion := false
+		for deviceName := range deviceOverrides {
+			_, isLocalDevice := entry.Devices[deviceName]
+			if !isLocalDevice {
+				needProfileExpansion = true
+				break
+			}
 		}
 
-		// Allow setting device overrides
-		for k, m := range deviceMap {
-			if entry.Devices[k] == nil {
-				entry.Devices[k] = m
-				continue
-			}
+		profileDevices := make(map[string]map[string]string)
 
-			for key, value := range m {
-				entry.Devices[k][key] = value
+		// If there are device overrides that are expected to be applied to profile devices then perform
+		// profile expansion.
+		if needProfileExpansion {
+			// If the list of profiles is empty then LXD would apply the default profile on the server side.
+			profileDevices, err = getProfileDevices(dest, entry.Profiles)
+			if err != nil {
+				return err
 			}
+		}
+
+		// Apply device overrides.
+		entry.Devices, err = shared.ApplyDeviceOverrides(profileDevices, entry.Devices, deviceOverrides)
+		if err != nil {
+			return err
+		}
+
+		// Allow setting additional config keys.
+		for key, value := range configMap {
+			entry.Config[key] = value
 		}
 
 		// Allow overriding the ephemeral status
@@ -202,10 +222,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Ephemeral = false
 		}
 
-		rootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(entry.Devices)
-		if err != nil {
-			return err
-		}
+		rootDiskDeviceKey, _, _ := instancetype.GetRootDiskDevice(entry.Devices)
 
 		if rootDiskDeviceKey != "" && pool != "" {
 			entry.Devices[rootDiskDeviceKey]["pool"] = pool
@@ -223,7 +240,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 
 			if !keepVolatile {
 				for k := range entry.Config {
-					if !shared.InstanceIncludeWhenCopying(k, true) {
+					if !instancetype.InstanceIncludeWhenCopying(k, true) {
 						delete(entry.Config, k)
 					}
 				}
@@ -269,21 +286,37 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Profiles = []string{}
 		}
 
-		// Allow setting additional config keys
-		for key, value := range configMap {
-			entry.Config[key] = value
+		// Check to see if any of the devices overrides are for devices that are not yet defined in the
+		// local devices and thus are expected to be coming from profiles.
+		needProfileExpansion := false
+		for deviceName := range deviceOverrides {
+			_, isLocalDevice := entry.Devices[deviceName]
+			if !isLocalDevice {
+				needProfileExpansion = true
+				break
+			}
 		}
 
-		// Allow setting device overrides
-		for k, m := range deviceMap {
-			if entry.Devices[k] == nil {
-				entry.Devices[k] = m
-				continue
-			}
+		profileDevices := make(map[string]map[string]string)
 
-			for key, value := range m {
-				entry.Devices[k][key] = value
+		// If there are device overrides that are expected to be applied to profile devices then perform
+		// profile expansion.
+		if needProfileExpansion {
+			profileDevices, err = getProfileDevices(dest, entry.Profiles)
+			if err != nil {
+				return err
 			}
+		}
+
+		// Apply device overrides.
+		entry.Devices, err = shared.ApplyDeviceOverrides(entry.Devices, profileDevices, deviceOverrides)
+		if err != nil {
+			return err
+		}
+
+		// Allow setting additional config keys.
+		for key, value := range configMap {
+			entry.Config[key] = value
 		}
 
 		// Allow overriding the ephemeral status
@@ -293,7 +326,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Ephemeral = false
 		}
 
-		rootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(entry.Devices)
+		rootDiskDeviceKey, _, _ := instancetype.GetRootDiskDevice(entry.Devices)
 		if rootDiskDeviceKey != "" && pool != "" {
 			entry.Devices[rootDiskDeviceKey]["pool"] = pool
 		} else if pool != "" {
@@ -307,7 +340,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		// Strip the volatile keys if requested
 		if !keepVolatile {
 			for k := range entry.Config {
-				if !shared.InstanceIncludeWhenCopying(k, true) {
+				if !instancetype.InstanceIncludeWhenCopying(k, true) {
 					delete(entry.Config, k)
 				}
 			}
@@ -364,8 +397,8 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Ensure we don't change the target's root disk pool.
-		srcRootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(writable.Devices)
-		destRootDiskDeviceKey, destRootDiskDevice, _ := shared.GetRootDiskDevice(inst.Devices)
+		srcRootDiskDeviceKey, _, _ := instancetype.GetRootDiskDevice(writable.Devices)
+		destRootDiskDeviceKey, destRootDiskDevice, _ := instancetype.GetRootDiskDevice(inst.Devices)
 		if srcRootDiskDeviceKey != "" && srcRootDiskDeviceKey == destRootDiskDeviceKey {
 			writable.Devices[destRootDiskDeviceKey]["pool"] = destRootDiskDevice["pool"]
 		}
@@ -397,33 +430,10 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		progress.Done("")
 	}
 
-	// If choosing a random name, show it to the user
-	if destResource == "" && c.flagTargetProject == "" {
-		// Get the successful operation data
-		opInfo, err := op.GetTarget()
-		if err != nil {
-			return err
-		}
-
-		// Extract the list of affected instances
-		instances, ok := opInfo.Resources["instances"]
-		if !ok || len(instances) != 1 {
-			// Extract the list of affected instances using old "containers" field
-			instances, ok = opInfo.Resources["containers"]
-			if !ok || len(instances) != 1 {
-				return fmt.Errorf(i18n.G("Failed to get the new instance name"))
-			}
-		}
-
-		// Extract the name of the instance
-		fields := strings.Split(instances[0], "/")
-		fmt.Printf(i18n.G("Instance name is: %s")+"\n", fields[len(fields)-1])
-	}
-
 	// Start the instance if needed
 	if start {
 		req := api.InstanceStatePut{
-			Action: string(shared.Start),
+			Action: string(instancetype.Start),
 		}
 
 		op, err := dest.UpdateInstanceState(destName, req, "")

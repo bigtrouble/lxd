@@ -10,11 +10,12 @@ import (
 	"strings"
 	"time"
 
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/operations"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 	"github.com/canonical/lxd/shared/validate"
 )
@@ -84,18 +85,19 @@ func (d *lvm) load() error {
 // Info returns info about the driver and its environment.
 func (d *lvm) Info() Info {
 	return Info{
-		Name:              "lvm",
-		Version:           lvmVersion,
-		OptimizedImages:   d.usesThinpool(), // Only thinpool pools support optimized images.
-		PreservesInodes:   false,
-		Remote:            d.isRemote(),
-		VolumeTypes:       []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
-		BlockBacking:      true,
-		RunningCopyFreeze: true,
-		DirectIO:          true,
-		IOUring:           true,
-		MountedRoot:       false,
-		Buckets:           true,
+		Name:                         "lvm",
+		Version:                      lvmVersion,
+		DefaultVMBlockFilesystemSize: deviceConfig.DefaultVMBlockFilesystemSize,
+		OptimizedImages:              d.usesThinpool(), // Only thinpool pools support optimized images.
+		PreservesInodes:              false,
+		Remote:                       d.isRemote(),
+		VolumeTypes:                  []VolumeType{VolumeTypeBucket, VolumeTypeCustom, VolumeTypeImage, VolumeTypeContainer, VolumeTypeVM},
+		BlockBacking:                 true,
+		RunningCopyFreeze:            true,
+		DirectIO:                     true,
+		IOUring:                      true,
+		MountedRoot:                  false,
+		Buckets:                      true,
 	}
 }
 
@@ -503,12 +505,42 @@ func (d *lvm) Delete(op *operations.Operation) error {
 
 func (d *lvm) Validate(config map[string]string) error {
 	rules := map[string]func(value string) error{
-		"size":                       validate.Optional(validate.IsSize),
-		"lvm.vg_name":                validate.IsAny,
-		"lvm.thinpool_name":          validate.IsAny,
+		"size": validate.Optional(validate.IsSize),
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=lvm.vg_name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: name of the pool
+		//  shortdesc: Name of the volume group to create
+		"lvm.vg_name": validate.IsAny,
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=lvm.thinpool_name)
+		//
+		// ---
+		//  type: string
+		//  defaultdesc: `LXDThinPool`
+		//  shortdesc: Thin pool where volumes are created
+		"lvm.thinpool_name": validate.IsAny,
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=lvm.thinpool_metadata_size)
+		// By default, LVM calculates an appropriate size.
+		// ---
+		//  type: string
+		//  defaultdesc: `0` (auto)
+		//  shortdesc: The size of the thin pool metadata volume
 		"lvm.thinpool_metadata_size": validate.Optional(validate.IsSize),
-		"lvm.use_thinpool":           validate.Optional(validate.IsBool),
-		"lvm.vg.force_reuse":         validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=lvm.use_thinpool)
+		//
+		// ---
+		//  type: bool
+		//  defaultdesc: `true`
+		//  shortdesc: Whether the storage pool uses a thin pool for logical volumes
+		"lvm.use_thinpool": validate.Optional(validate.IsBool),
+		// lxdmeta:generate(entities=storage-lvm; group=pool-conf; key=lvm.vg.force_reuse)
+		//
+		// ---
+		//  type: bool
+		//  defaultdesc: `false`
+		//  shortdesc: Force using an existing non-empty volume group
+		"lvm.vg.force_reuse": validate.Optional(validate.IsBool),
 	}
 
 	err := d.validatePool(config, rules, d.commonVolumeRules())

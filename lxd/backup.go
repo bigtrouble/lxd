@@ -14,21 +14,21 @@ import (
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/operationtype"
+	"github.com/canonical/lxd/lxd/idmap"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
+	"github.com/canonical/lxd/lxd/instancewriter"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/project"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	"github.com/canonical/lxd/lxd/task"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
-	"github.com/canonical/lxd/shared/idmap"
-	"github.com/canonical/lxd/shared/instancewriter"
 	"github.com/canonical/lxd/shared/ioprogress"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/units"
 )
 
@@ -53,16 +53,18 @@ func backupCreate(s *state.State, args db.InstanceBackup, sourceInst instance.In
 	}
 
 	// Create the database entry.
-	err = s.DB.Cluster.CreateInstanceBackup(args)
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.CreateInstanceBackup(ctx, args)
+	})
 	if err != nil {
-		if err == db.ErrAlreadyDefined {
-			return fmt.Errorf("Backup %q already exists", args.Name)
-		}
-
-		return fmt.Errorf("Insert backup info into database: %w", err)
+		return fmt.Errorf("Failed creating instance backup record: %w", err)
 	}
 
-	revert.Add(func() { _ = s.DB.Cluster.DeleteInstanceBackup(args.Name) })
+	revert.Add(func() {
+		_ = s.DB.Cluster.Transaction(context.Background(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.DeleteInstanceBackup(ctx, args.Name)
+		})
+	})
 
 	// Get the backup struct.
 	b, err := instance.BackupLoadByName(s, sourceInst.Project().Name, args.Name)
@@ -124,7 +126,11 @@ func backupCreate(s *state.State, args db.InstanceBackup, sourceInst instance.In
 	// Get IDMap to unshift container as the tarball is created.
 	var idmap *idmap.IdmapSet
 	if sourceInst.Type() == instancetype.Container {
-		c := sourceInst.(instance.Container)
+		c, ok := sourceInst.(instance.Container)
+		if !ok {
+			return fmt.Errorf("Invalid instance type")
+		}
+
 		idmap, err = c.DiskIdmap()
 		if err != nil {
 			return fmt.Errorf("Error getting container IDMAP: %w", err)
@@ -348,8 +354,14 @@ func pruneExpiredBackupsTask(d *Daemon) (task.Func, task.Schedule) {
 }
 
 func pruneExpiredInstanceBackups(ctx context.Context, s *state.State) error {
+	var backups []db.InstanceBackup
+
 	// Get the list of expired backups.
-	backups, err := s.DB.Cluster.GetExpiredInstanceBackups()
+	err := s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		backups, err = tx.GetExpiredInstanceBackups(ctx)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Unable to retrieve the list of expired instance backups: %w", err)
 	}
@@ -390,18 +402,25 @@ func volumeBackupCreate(s *state.State, args db.StoragePoolVolumeBackup, project
 	}
 
 	// Create the database entry.
-	err = s.DB.Cluster.CreateStoragePoolVolumeBackup(args)
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.CreateStoragePoolVolumeBackup(ctx, args)
+	})
 	if err != nil {
-		if err == db.ErrAlreadyDefined {
-			return fmt.Errorf("Backup %q already exists", args.Name)
-		}
-
-		return fmt.Errorf("Failed creating backup record: %w", err)
+		return fmt.Errorf("Failed creating storage volume backup record: %w", err)
 	}
 
-	revert.Add(func() { _ = s.DB.Cluster.DeleteStoragePoolVolumeBackup(args.Name) })
+	revert.Add(func() {
+		_ = s.DB.Cluster.Transaction(context.Background(), func(ctx context.Context, tx *db.ClusterTx) error {
+			return tx.DeleteStoragePoolVolumeBackup(ctx, args.Name)
+		})
+	})
 
-	backupRow, err := s.DB.Cluster.GetStoragePoolVolumeBackup(projectName, poolName, args.Name)
+	var backupRow db.StoragePoolVolumeBackup
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		backupRow, err = tx.GetStoragePoolVolumeBackup(ctx, projectName, poolName, args.Name)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("Failed getting backup record: %w", err)
 	}

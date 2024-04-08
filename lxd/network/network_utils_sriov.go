@@ -16,6 +16,7 @@ import (
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/device/pci"
+	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/ip"
 	"github.com/canonical/lxd/lxd/network/openvswitch"
 	"github.com/canonical/lxd/lxd/state"
@@ -58,27 +59,34 @@ func SRIOVGetHostDevicesInUse(s *state.State) (map[string]struct{}, error) {
 	reservedDevices := map[string]struct{}{}
 
 	// Check if any instances are using the VF device.
-	err = s.DB.Cluster.InstanceList(context.TODO(), func(dbInst db.InstanceArgs, p api.Project) error {
-		// Expand configs so we take into account profile devices.
-		dbInst.Config = db.ExpandInstanceConfig(dbInst.Config, dbInst.Profiles)
-		dbInst.Devices = db.ExpandInstanceDevices(dbInst.Devices, dbInst.Profiles)
-
-		for name, dev := range dbInst.Devices {
-			// If device references a parent host interface name, mark that as reserved.
-			parent := dev["parent"]
-			if parent != "" {
-				reservedDevices[parent] = struct{}{}
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		return tx.InstanceList(ctx, func(dbInst db.InstanceArgs, p api.Project) error {
+			// Expand configs so we take into account profile devices.
+			var globalConfigDump map[string]any
+			if s.GlobalConfig != nil {
+				globalConfigDump = s.GlobalConfig.Dump()
 			}
 
-			// If device references a volatile host interface name, mark that as reserved.
-			hostName := dbInst.Config[fmt.Sprintf("volatile.%s.host_name", name)]
-			if hostName != "" {
-				reservedDevices[hostName] = struct{}{}
-			}
-		}
+			dbInst.Config = instancetype.ExpandInstanceConfig(globalConfigDump, dbInst.Config, dbInst.Profiles)
+			dbInst.Devices = instancetype.ExpandInstanceDevices(dbInst.Devices, dbInst.Profiles)
 
-		return nil
-	}, filter)
+			for name, dev := range dbInst.Devices {
+				// If device references a parent host interface name, mark that as reserved.
+				parent := dev["parent"]
+				if parent != "" {
+					reservedDevices[parent] = struct{}{}
+				}
+
+				// If device references a volatile host interface name, mark that as reserved.
+				hostName := dbInst.Config[fmt.Sprintf("volatile.%s.host_name", name)]
+				if hostName != "" {
+					reservedDevices[hostName] = struct{}{}
+				}
+			}
+
+			return nil
+		}, filter)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +340,7 @@ func SRIOVFindRepresentorPort(nicEntries []fs.DirEntry, pfSwitchID string, pfID 
 	return ""
 }
 
+// SRIOVGetSwitchAndPFID returns the physical switch ID and PF id.
 func SRIOVGetSwitchAndPFID(parentDev string) (string, int, error) {
 	physPortName, err := os.ReadFile(filepath.Join(sysClassNet, parentDev, "phys_port_name"))
 	if err != nil {
@@ -368,7 +377,7 @@ func SRIOVGetSwitchAndPFID(parentDev string) (string, int, error) {
 // To do this it first looks at the ports on the OVS bridge specified and identifies which ones are PF ports in
 // switchdev mode. It then tries to find a free VF on that PF and the representor port associated to the VF ID.
 // It returns the PF name, representor port name, VF name, and VF ID.
-func SRIOVFindFreeVFAndRepresentor(state *state.State, ovsBridgeName string) (string, string, string, int, error) {
+func SRIOVFindFreeVFAndRepresentor(state *state.State, ovsBridgeName string) (port string, representorPort string, vfName string, vfID int, err error) {
 	nics, err := os.ReadDir(sysClassNet)
 	if err != nil {
 		return "", "", "", -1, fmt.Errorf("Failed to read directory %q: %w", sysClassNet, err)

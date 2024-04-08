@@ -7,21 +7,24 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/canonical/lxd/lxd/auth"
 	clusterRequest "github.com/canonical/lxd/lxd/cluster/request"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/network"
 	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var networkAllocationsCmd = APIEndpoint{
 	Path: "network-allocations",
 
-	Get: APIEndpointAction{Handler: networkAllocationsGet, AccessHandler: allowProjectPermission("networks", "view")},
+	Get: APIEndpointAction{Handler: networkAllocationsGet, AccessHandler: allowAuthenticated},
 }
 
 // swagger:operation GET /1.0/network-allocations network-allocations network_allocations_get
@@ -71,12 +74,14 @@ var networkAllocationsCmd = APIEndpoint{
 //	  "500":
 //	    $ref: "#/responses/InternalServerError"
 func networkAllocationsGet(d *Daemon, r *http.Request) response.Response {
-	projectName, _, err := project.NetworkProject(d.State().DB.Cluster, projectParam(r))
+	s := d.State()
+
+	projectName, _, err := project.NetworkProject(d.State().DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
 
-	allProjects := shared.IsTrue(queryParam(r, "all-projects"))
+	allProjects := shared.IsTrue(request.QueryParam(r, "all-projects"))
 
 	var projectNames []string
 	err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
@@ -114,15 +119,32 @@ func networkAllocationsGet(d *Daemon, r *http.Request) response.Response {
 
 	result := make([]api.NetworkAllocations, 0)
 
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanView, entity.TypeNetwork)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
 	// Then, get all the networks, their network forwards and their network load balancers.
 	for _, projectName := range projectNames {
-		networkNames, err := d.db.Cluster.GetNetworks(projectName)
+		var networkNames []string
+
+		err := d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var err error
+
+			networkNames, err = tx.GetNetworks(ctx, projectName)
+
+			return err
+		})
 		if err != nil {
 			return response.SmartError(fmt.Errorf("Failed loading networks: %w", err))
 		}
 
 		// Get all the networks, their attached instances, their network forwards and their network load balancers.
 		for _, networkName := range networkNames {
+			if !userHasPermission(entity.NetworkURL(projectName, networkName)) {
+				continue
+			}
+
 			n, err := network.LoadByName(d.State(), projectName, networkName)
 			if err != nil {
 				return response.SmartError(fmt.Errorf("Failed loading network %q in project %q: %w", networkName, projectName, err))
@@ -166,7 +188,13 @@ func networkAllocationsGet(d *Daemon, r *http.Request) response.Response {
 				}
 			}
 
-			forwards, err := d.db.Cluster.GetNetworkForwards(r.Context(), n.ID(), false)
+			var forwards map[int64]*api.NetworkForward
+
+			err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+				forwards, err = tx.GetNetworkForwards(ctx, n.ID(), false)
+
+				return err
+			})
 			if err != nil {
 				return response.SmartError(fmt.Errorf("Failed getting forwards for network %q in project %q: %w", networkName, projectName, err))
 			}
@@ -188,7 +216,13 @@ func networkAllocationsGet(d *Daemon, r *http.Request) response.Response {
 				)
 			}
 
-			loadBalancers, err := d.db.Cluster.GetNetworkLoadBalancers(r.Context(), n.ID(), false)
+			var loadBalancers map[int64]*api.NetworkLoadBalancer
+
+			err = d.db.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+				loadBalancers, err = tx.GetNetworkLoadBalancers(ctx, n.ID(), false)
+
+				return err
+			})
 			if err != nil {
 				return response.SmartError(fmt.Errorf("Failed getting load-balancers for network %q in project %q: %w", networkName, projectName, err))
 			}

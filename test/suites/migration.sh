@@ -292,8 +292,48 @@ migration() {
   lxc_remote copy l1:c1 l2:c2 --refresh
   lxc_remote start l2:c2
   lxc_remote file pull l2:c2/root/testfile1 .
+  [ "$(cat testfile1)" = "test" ]
   rm testfile1
   lxc_remote stop -f l2:c2
+
+  # Change the files modification time by adding one nanosecond.
+  # Perform the change on the test runner since the busybox instances `touch` doesn't support setting nanoseconds.
+  lxc_remote start l1:c1
+  c1_pid="$(lxc_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  mtime_old="$(stat -c %y "/proc/${c1_pid}/root/root/testfile1")"
+  mtime_old_ns="$(date -d "$mtime_old" +%N | sed 's/^0*//')"
+
+  # Ensure the final nanoseconds are padded with zeros to create a valid format.
+  mtime_new_ns="$(printf "%09d\n" "$((mtime_old_ns+1))")"
+  mtime_new="$(date -d "$mtime_old" "+%Y-%m-%d %H:%M:%S.${mtime_new_ns} %z")"
+  lxc_remote stop -f l1:c1
+
+  # Before setting the new mtime create a local copy too.
+  lxc_remote copy l1:c1 l1:c2
+
+  # Change the modification time.
+  lxc_remote start l1:c1
+  c1_pid="$(lxc_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  touch -m -d "$mtime_new" "/proc/${c1_pid}/root/root/testfile1"
+  lxc_remote stop -f l1:c1
+
+  # Starting from rsync 3.1.3 it should discover the change of +1 nanosecond.
+  # Check if the file got refreshed to a different remote.
+  lxc_remote copy l1:c1 l2:c2 --refresh
+  lxc_remote start l1:c1 l2:c2
+  c1_pid="$(lxc_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  c2_pid="$(lxc_remote query l2:/1.0/instances/c2?recursion=1 | jq -r .state.pid)"
+  [ "$(stat "/proc/${c1_pid}/root/root/testfile1" -c %y)" = "$(stat "/proc/${c2_pid}/root/root/testfile1" -c %y)" ]
+  lxc_remote stop -f l1:c1 l2:c2
+
+  # Check if the file got refreshed locally.
+  lxc_remote copy l1:c1 l1:c2 --refresh
+  lxc_remote start l1:c1 l1:c2
+  c1_pid="$(lxc_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  c2_pid="$(lxc_remote query l1:/1.0/instances/c2?recursion=1 | jq -r .state.pid)"
+  [ "$(stat "/proc/${c1_pid}/root/root/testfile1" -c %y)" = "$(stat "/proc/${c2_pid}/root/root/testfile1" -c %y)" ]
+  lxc_remote rm -f l1:c2
+  lxc_remote stop -f l1:c1
 
   # This will create snapshot c1/snap0 with test device and expiry date.
   lxc_remote config device add l1:c1 testsnapdev none
@@ -344,6 +384,12 @@ migration() {
   lxc_remote storage volume get l2:"$remote_pool2" vol2 user.foo | grep -Fx "postsnap1vol1"
   lxc_remote storage volume get l2:"$remote_pool2" vol2/snap0 user.foo | grep -Fx "snap0vol1"
   lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 user.foo | grep -Fx "snap1vol1"
+
+  # check copied volume and snapshots have different UUIDs
+  [ "$(lxc_remote storage volume get l1:"$remote_pool1" vol1 volatile.uuid)" != "$(lxc_remote storage volume get l2:"$remote_pool2" vol2 volatile.uuid)" ]
+  [ "$(lxc_remote storage volume get l1:"$remote_pool1" vol1/snap0 volatile.uuid)" != "$(lxc_remote storage volume get l2:"$remote_pool2" vol2/snap0 volatile.uuid)" ]
+  [ "$(lxc_remote storage volume get l1:"$remote_pool1" vol1/snap1 volatile.uuid)" != "$(lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 volatile.uuid)" ]
+
   lxc_remote storage volume delete l2:"$remote_pool2" vol2
 
   # check moving volume and snapshots.
@@ -392,8 +438,19 @@ migration() {
   lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 user.foo | grep -Fx "snap1vol3"
   lxc_remote storage volume get l2:"$remote_pool2" vol2/snap2 user.foo | grep -Fx "snap2vol3"
   ! lxc_remote storage volume show l2:"$remote_pool2" vol2/snapremove || false
-
   lxc_remote storage volume delete l2:"$remote_pool2" vol2
+
+  # check that a refresh doesn't change the volume's and snapshot's UUID.
+  lxc_remote storage volume create l1:"$remote_pool1" vol1
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol1
+  lxc_remote storage volume copy l1:"$remote_pool1"/vol1 l2:"$remote_pool2"/vol2
+  old_uuid="$(lxc storage volume get l2:"$remote_pool2" vol2 volatile.uuid)"
+  old_snap0_uuid="$(lxc storage volume get l2:"$remote_pool2" vol2/snap0 volatile.uuid)"
+  lxc_remote storage volume copy l1:"$remote_pool1/vol1" l2:"$remote_pool2/vol2" --refresh
+  [ "$(lxc storage volume get l2:"$remote_pool2" vol2 volatile.uuid)" = "${old_uuid}" ]
+  [ "$(lxc storage volume get l2:"$remote_pool2" vol2/snap0 volatile.uuid)" = "${old_snap0_uuid}" ]
+  lxc_remote storage volume delete l2:"$remote_pool2" vol2
+  lxc_remote storage volume delete l1:"$remote_pool1" vol1
 
   # remote storage volume migration in "push" mode
   lxc_remote storage volume create l1:"$remote_pool1" vol1
@@ -471,6 +528,16 @@ migration() {
   lxc_remote project switch l1:default
   lxc_remote project delete l1:proj
 
+  # Check snapshot creation dates after migration.
+  lxc_remote init testimage l1:c1
+  lxc_remote snapshot l1:c1
+  ! lxc_remote storage volume show "l1:${remote_pool1}" container/c1 | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  ! lxc_remote storage volume show "l1:${remote_pool1}" container/c1/snap0 | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  lxc_remote copy l1:c1 l2:c1
+  ! lxc_remote storage volume show "l2:${remote_pool2}" container/c1 | grep -q '^created_at: 0001-01-01T00:00:00Z' || false
+  [ "$(lxc_remote storage volume show "l1:${remote_pool1}" container/c1/snap0 | awk /created_at:/)" = "$(lxc_remote storage volume show "l2:${remote_pool2}" container/c1/snap0 | awk /created_at:/)" ]
+  lxc_remote delete l1:c1 -f
+  lxc_remote delete l2:c1 -f
 
   # Check migration with invalid snapshot config (disks attached with missing source pool and source path).
   lxc_remote init testimage l1:c1

@@ -33,6 +33,7 @@ var api10 = []APIEndpoint{
 	operationsCmd,
 	operationCmd,
 	operationWebsocket,
+	operationWait,
 	sftpCmd,
 	stateCmd,
 }
@@ -44,7 +45,7 @@ func api10Get(d *Daemon, r *http.Request) response.Response {
 		APIVersion:    version.APIVersion,
 		Public:        false,
 		Auth:          "trusted",
-		AuthMethods:   []string{"tls"},
+		AuthMethods:   []string{api.AuthenticationMethodTLS},
 	}
 
 	uname, err := shared.Uname()
@@ -168,7 +169,11 @@ func stopDevlxdServer(d *Daemon) error {
 	d.devlxdRunning = false
 	d.devlxdMu.Unlock()
 
-	return servers["devlxd"].Close()
+	if servers["devlxd"] != nil {
+		return servers["devlxd"].Close()
+	}
+
+	return nil
 }
 
 func getClient(CID uint32, port int, serverCertificate string) (*http.Client, error) {
@@ -191,8 +196,13 @@ func getClient(CID uint32, port int, serverCertificate string) (*http.Client, er
 }
 
 func startHTTPServer(d *Daemon, debug bool) error {
-	// Setup the listener on VM's context ID for inbound connections from LXD.
-	l, err := vsock.Listen(shared.HTTPSDefaultPort, nil)
+	const CIDAny uint32 = 4294967295 // Equivalent to VMADDR_CID_ANY.
+
+	// Setup the listener on wildcard CID for inbound connections from LXD.
+	// We use the VMADDR_CID_ANY CID so that if the VM's CID changes in the future the listener still works.
+	// A CID change can occur when restoring a stateful VM that was previously using one CID but is
+	// subsequently restored using a different one.
+	l, err := vsock.ListenContextID(CIDAny, shared.HTTPSDefaultPort, nil)
 	if err != nil {
 		return fmt.Errorf("Failed to listen on vsock: %w", err)
 	}

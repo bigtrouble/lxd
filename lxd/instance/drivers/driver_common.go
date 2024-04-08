@@ -2,7 +2,6 @@ package drivers
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,12 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
-	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/lxd/device"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/device/nictype"
@@ -29,12 +27,13 @@ import (
 	"github.com/canonical/lxd/lxd/maas"
 	"github.com/canonical/lxd/lxd/operations"
 	"github.com/canonical/lxd/lxd/project"
-	"github.com/canonical/lxd/lxd/revert"
 	"github.com/canonical/lxd/lxd/state"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
 	"github.com/canonical/lxd/shared/logger"
+	"github.com/canonical/lxd/shared/revert"
 )
 
 // ErrExecCommandNotFound indicates the command is not found.
@@ -208,8 +207,14 @@ func (d *common) Operation() *operations.Operation {
 
 // Backups returns a list of backups.
 func (d *common) Backups() ([]backup.InstanceBackup, error) {
+	var backupNames []string
+
 	// Get all the backups
-	backupNames, err := d.state.DB.Cluster.GetInstanceBackups(d.project.Name, d.name)
+	err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		backupNames, err = tx.GetInstanceBackups(ctx, d.project.Name, d.name)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +326,7 @@ func (d *common) Snapshots() ([]instance.Instance, error) {
 func (d *common) VolatileSet(changes map[string]string) error {
 	// Quick check.
 	for key := range changes {
-		if !strings.HasPrefix(key, shared.ConfigVolatilePrefix) {
+		if !strings.HasPrefix(key, instancetype.ConfigVolatilePrefix) {
 			return fmt.Errorf("Only volatile keys can be modified with VolatileSet")
 		}
 	}
@@ -504,8 +509,13 @@ func (d *common) deviceVolatileSetFunc(devName string) func(save map[string]stri
 
 // expandConfig applies the config of each profile in order, followed by the local config.
 func (d *common) expandConfig() error {
-	d.expandedConfig = db.ExpandInstanceConfig(d.localConfig, d.profiles)
-	d.expandedDevices = db.ExpandInstanceDevices(d.localDevices, d.profiles)
+	var globalConfigDump map[string]any
+	if d.state.GlobalConfig != nil {
+		globalConfigDump = d.state.GlobalConfig.Dump()
+	}
+
+	d.expandedConfig = instancetype.ExpandInstanceConfig(globalConfigDump, d.localConfig, d.profiles)
+	d.expandedDevices = instancetype.ExpandInstanceDevices(d.localDevices, d.profiles)
 
 	return nil
 }
@@ -759,19 +769,19 @@ func (d *common) updateProgress(progress string) {
 // unpopulated then the insert querty is retried until it succeeds or a retry limit is reached.
 // If the insert succeeds or the key is found to have been populated then the value of the key is returned.
 func (d *common) insertConfigkey(key string, value string) (string, error) {
-	err := query.Retry(func() error {
-		err := query.Transaction(context.TODO(), d.state.DB.Cluster.DB(), func(ctx context.Context, tx *sql.Tx) error {
-			return db.CreateInstanceConfig(tx, d.id, map[string]string{key: value})
-		})
-		if err != nil {
-			// Check if something else filled it in behind our back.
-			existingValue, errCheckExists := d.state.DB.Cluster.GetInstanceConfig(d.id, key)
-			if errCheckExists != nil {
-				return err
-			}
-
-			value = existingValue
+	err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		err := tx.CreateInstanceConfig(ctx, d.id, map[string]string{key: value})
+		if err == nil {
+			return nil
 		}
+
+		// Check if something else filled it in behind our back.
+		existingValue, errCheckExists := tx.GetInstanceConfig(ctx, d.id, key)
+		if errCheckExists != nil {
+			return err
+		}
+
+		value = existingValue
 
 		return nil
 	})
@@ -995,7 +1005,7 @@ func (d *common) validateStartup(stateful bool, statusCode api.StatusCode) error
 	// pre-start check here before the isStartableStatusCode check below so that if there is a problem loading
 	// the instance status because the storage pool isn't available we don't mask the StatusServiceUnavailable
 	// error with an ERROR status code from the instance check instead.
-	_, rootDiskConf, err := shared.GetRootDiskDevice(d.expandedDevices.CloneNative())
+	_, rootDiskConf, err := instancetype.GetRootDiskDevice(d.expandedDevices.CloneNative())
 	if err != nil {
 		return err
 	}
@@ -1055,7 +1065,7 @@ func (d *common) onStopOperationSetup(target string) (*operationlock.InstanceOpe
 // warningsDelete deletes any persistent warnings for the instance.
 func (d *common) warningsDelete() error {
 	err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		return dbCluster.DeleteWarnings(ctx, tx.Tx(), dbCluster.TypeInstance, d.ID())
+		return dbCluster.DeleteWarnings(ctx, tx.Tx(), dbCluster.EntityType(entity.TypeInstance), d.ID())
 	})
 	if err != nil {
 		return fmt.Errorf("Failed deleting persistent warnings: %w", err)
@@ -1067,7 +1077,7 @@ func (d *common) warningsDelete() error {
 // canMigrate determines if the given instance can be migrated and whether the migration
 // can be live. In "auto" mode, the function checks each attached device of the instance
 // to ensure they are all migratable.
-func (d *common) canMigrate(inst instance.Instance) (bool, bool) {
+func (d *common) canMigrate(inst instance.Instance) (migrate bool, live bool) {
 	// Check policy for the instance.
 	config := d.ExpandedConfig()
 	val, ok := config["cluster.evacuate"]
@@ -1091,7 +1101,9 @@ func (d *common) canMigrate(inst instance.Instance) (bool, bool) {
 	volatileGet := func() map[string]string { return map[string]string{} }
 	volatileSet := func(_ map[string]string) error { return nil }
 	for deviceName, rawConfig := range d.ExpandedDevices() {
-		dev, err := device.New(inst, d.state, deviceName, rawConfig, volatileGet, volatileSet)
+		// Make sure to clone the devices config for new devices.
+		// Some device drivers might modify the configuration and populate additional settings.
+		dev, err := device.New(inst, d.state, deviceName, rawConfig.Clone(), volatileGet, volatileSet)
 		if err != nil {
 			logger.Warn("Instance will not be migrated due to a device error", logger.Ctx{"project": inst.Project().Name, "instance": inst.Name(), "device": dev.Name(), "err": err})
 			return false, false
@@ -1105,7 +1117,6 @@ func (d *common) canMigrate(inst instance.Instance) (bool, bool) {
 
 	// Check if set up for live migration.
 	// Limit automatic live-migration to virtual machines for now.
-	live := false
 	if inst.Type() == instancetype.VM {
 		live = shared.IsTrue(config["migration.stateful"])
 	}
@@ -1175,7 +1186,7 @@ func (d *common) getRootDiskDevice() (string, map[string]string, error) {
 	}
 
 	// Retrieve the instance's storage pool.
-	name, configuration, err := shared.GetRootDiskDevice(devices.CloneNative())
+	name, configuration, err := instancetype.GetRootDiskDevice(devices.CloneNative())
 	if err != nil {
 		return "", nil, err
 	}
@@ -1185,7 +1196,7 @@ func (d *common) getRootDiskDevice() (string, map[string]string, error) {
 
 // resetInstanceID generates a new UUID and puts it in volatile.
 func (d *common) resetInstanceID() error {
-	err := d.VolatileSet(map[string]string{"volatile.cloud-init.instance-id": uuid.New()})
+	err := d.VolatileSet(map[string]string{"volatile.cloud-init.instance-id": uuid.New().String()})
 	if err != nil {
 		return fmt.Errorf("Failed to set volatile.cloud-init.instance-id: %w", err)
 	}
@@ -1260,7 +1271,18 @@ func (d *common) getStoragePool() (storagePools.Pool, error) {
 		return d.storagePool, nil
 	}
 
-	poolName, err := d.state.DB.Cluster.GetInstancePool(d.Project().Name, d.Name())
+	var poolName string
+
+	err := d.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		poolName, err = tx.GetInstancePool(ctx, d.Project().Name, d.Name())
+		if err != nil {
+			return fmt.Errorf("Failed getting instance pool: %w", err)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1568,7 +1590,7 @@ func (d *common) devicesRemove(inst instance.Instance) {
 }
 
 // updateBackupFileLock acquires the update backup file lock that protects concurrent access to actions that will call UpdateBackupFile() as part of their operation.
-func (d *common) updateBackupFileLock(ctx context.Context) locking.UnlockFunc {
+func (d *common) updateBackupFileLock(ctx context.Context) (locking.UnlockFunc, error) {
 	parentName, _, _ := api.GetParentAndSnapshotName(d.Name())
 	return locking.Lock(ctx, fmt.Sprintf("instance_updatebackupfile_%s_%s", d.Project().Name, parentName))
 }

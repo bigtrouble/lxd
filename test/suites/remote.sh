@@ -11,9 +11,6 @@ test_remote_url() {
 
   # shellcheck disable=2153
   urls="${LXD_DIR}/unix.socket unix:${LXD_DIR}/unix.socket unix://${LXD_DIR}/unix.socket"
-  if [ -z "${LXD_OFFLINE:-}" ]; then
-    urls="images.linuxcontainers.org https://images.linuxcontainers.org ${urls}"
-  fi
 
   # an invalid protocol returns an error
   ! lxc_remote remote add test "${url}" --accept-certificate --password foo --protocol foo || false
@@ -22,6 +19,14 @@ test_remote_url() {
     lxc_remote remote add test "${url}"
     lxc_remote remote remove test
   done
+
+  # Check that we can add simplestream remotes with valid certs without confirmation
+  if [ -z "${LXD_OFFLINE:-}" ]; then
+    lxc_remote remote add ubuntu1 https://cloud-images.ubuntu.com/releases --protocol=simplestreams
+    lxc_remote remote add ubuntu2 https://cloud-images.ubuntu.com:443/releases --protocol=simplestreams
+    lxc_remote remote remove ubuntu1
+    lxc_remote remote remove ubuntu2
+  fi
 }
 
 test_remote_url_with_token() {
@@ -74,7 +79,7 @@ test_remote_url_with_token() {
   token="$(lxc config trust list-tokens -f json | jq '.[].Token')"
 
   # create new certificate
-  openssl req -x509 -newkey rsa:2048 -keyout "${TEST_DIR}/token-client.key" -nodes -out "${TEST_DIR}/token-client.crt" -subj "/CN=lxd.local"
+  gen_cert_and_key "${TEST_DIR}/token-client.key" "${TEST_DIR}/token-client.crt" "lxd.local"
 
   # Try accessing instances (this should fail)
   [ "$(curl -k -s --key "${TEST_DIR}/token-client.key" --cert "${TEST_DIR}/token-client.crt" "https://${LXD_ADDR}/1.0/instances" | jq '.error_code')" -eq 403 ]
@@ -170,14 +175,6 @@ test_remote_admin() {
     echo "wrong number of certs"
     false
   fi
-
-  # Check that we can add domains with valid certs without confirmation:
-  if [ -z "${LXD_OFFLINE:-}" ]; then
-    lxc_remote remote add images1 images.linuxcontainers.org
-    lxc_remote remote add images2 images.linuxcontainers.org:443
-    lxc_remote remote remove images1
-    lxc_remote remote remove images2
-  fi
 }
 
 test_remote_usage() {
@@ -263,10 +260,11 @@ test_remote_usage() {
   # testimage should still exist on the local server.
   lxc_remote image list local: | grep -q testimage
 
-  # Skip the truly remote servers in offline mode.  There should always be
-  # Ubuntu images in the results for the remote servers.
+  # Skip the truly remote servers in offline mode.
+  # There should always be Ubuntu images in the results from cloud-images.ubuntu.com remote.
+  # And test for alpine in the images.lxd.canonical.com remote.
   if [ -z "${LXD_OFFLINE:-}" ]; then
-    lxc_remote image list images: | grep -i -c ubuntu
+    lxc_remote image list images: | grep -i -c alpine
     lxc_remote image list ubuntu: | grep -i -c ubuntu
   fi
 

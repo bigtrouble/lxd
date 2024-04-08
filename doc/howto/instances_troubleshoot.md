@@ -14,12 +14,26 @@ To troubleshoot the problem, complete the following steps:
    Instance log
    : Enter the following command to display the instance log:
 
+     ````{tabs}
+     ```{group-tab} CLI
          lxc info <instance_name> --show-log
+     ```
+     ```{group-tab} API
+         lxc query --request GET /1.0/instances/<instance_name>/logs/lxc.log
+     ```
+     ````
 
    Console log
    : Enter the following command to display the console log:
 
+     ````{tabs}
+     ```{group-tab} CLI
          lxc console <instance_name> --show-log
+     ```
+     ```{group-tab} API
+         lxc query --request GET /1.0/instances/<instance_name>/console
+     ```
+     ````
 
    Detailed server information
    : The LXD snap includes a tool that collects the relevant server information for debugging.
@@ -57,7 +71,7 @@ The {doc}`container requirements <../container-environment>` specify that every 
 If those directories don't exist, LXD cannot mount them, and `systemd` will then try to do so.
 As this is an unprivileged container, `systemd` does not have the ability to do this, and it then freezes.
 
-So you can see the environment before anything is changed, and you can explicitly change the init system in a container using the `raw.lxc` configuration parameter.
+So you can see the environment before anything is changed, and you can explicitly change the init system in a container using the {config:option}`instance-raw:raw.lxc` configuration parameter.
 This is equivalent to setting `init=/bin/bash` on the Linux kernel command line.
 
     lxc config set systemd raw.lxc 'lxc.init.cmd = /bin/bash'
@@ -78,7 +92,7 @@ Console log:
 Now that the container has started, you can check it and see that things are not running as well as expected:
 
 ```{terminal}
-:input: lxc exec systemd bash
+:input: lxc exec systemd -- bash
 
 [root@systemd ~]# ls
 [root@systemd ~]# mount

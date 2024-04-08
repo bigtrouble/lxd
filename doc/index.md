@@ -1,12 +1,12 @@
 ---
-relatedlinks: https://ubuntu.com/lxd, https://ubuntu.com/blog/open-source-for-beginners-dev-environment-with-lxd
+relatedlinks: '[Run&#32;system&#32;containers&#32;with&#32;LXD](https://canonical.com/lxd), [Open&#32;source&#32;for&#32;beginners:&#32;setting&#32;up&#32;your&#32;dev&#32;environment&#32;with&#32;LXD](https://ubuntu.com/blog/open-source-for-beginners-dev-environment-with-lxd)'
 ---
 
 # LXD
 
 LXD (<a href="#" title="Listen" onclick="document.getElementById('player').play();return false;">`[lɛks'di:]`&#128264;</a>) is a modern, secure and powerful system container and virtual machine manager.
 
-<audio id="player">  <source src="_static/lxd.mp3" type="audio/mpeg">  <source src="_static/lxd.ogg" type="audio/ogg">  <source src="_static/lxd.wav" type="audio/wav"></audio>
+<audio id="player"><source src="_static/lxd.mp3" type="audio/mpeg"></audio>
 
 % Include content from [../README.md](../README.md)
 ```{include} ../README.md
@@ -22,14 +22,17 @@ LXD (<a href="#" title="Listen" onclick="document.getElementById('player').play(
 
 ````{grid} 1 1 2 2
 
-```{grid-item} [Tutorials](tutorial/index)
+```{grid-item-card} [Tutorial](tutorial/first_steps)
 
-**Start here**: a hands-on introduction to LXD for new users
+**Start here**: a hands-on introduction to LXD for new users, guiding you through your {ref}`first-steps`
 ```
 
-```{grid-item} [How-to guides](howto/index)
+```{grid-item-card} [How-to guides](howto/index)
 
 **Step-by-step guides** covering key operations and common tasks
+- {ref}`howtos-getstarted`
+- {ref}`howtos-work`
+- {ref}`howtos-production`
 ```
 
 ````
@@ -37,14 +40,24 @@ LXD (<a href="#" title="Listen" onclick="document.getElementById('player').play(
 ````{grid} 1 1 2 2
 :reverse:
 
-```{grid-item} [Reference](reference/index)
+```{grid-item-card} [Reference](reference/index)
 
-**Technical information** - specifications, APIs, architecture
+**Technical information**
+- {ref}`reference-general`
+- {ref}`reference-config`
+- {ref}`reference-production`
+- {ref}`reference-api`
+- {ref}`reference-manpages`
+- {ref}`reference-internal`
 ```
 
-```{grid-item} [Explanation](explanation/index)
+```{grid-item-card} [Explanation](explanation/index)
 
 **Discussion and clarification** of key topics
+- {ref}`explanation-concepts`
+- {ref}`explanation-entities`
+- {ref}`explanation-iam`
+- {ref}`explanation-production` (including {ref}`Security <security>`)
 ```
 
 ````
@@ -70,34 +83,13 @@ LXD (<a href="#" title="Listen" onclick="document.getElementById('player').play(
 :topical:restapi_landing
 :topical:Internals & debugging <internals>
 :topical:external_resources
-:topical:Switch to Diataxis navigation <https://documentation.ubuntu.com/lxd/en/latest/>
 ```
-
----
-
-## Security
-
-% Include content from [../README.md](../README.md)
-```{include} ../README.md
-    :start-after: <!-- Include start security -->
-    :end-before: <!-- Include end security -->
-```
-
-See {ref}`security` for detailed information.
-
-````{important}
-% Include content from [../README.md](../README.md)
-```{include} ../README.md
-    :start-after: <!-- Include start security note -->
-    :end-before: <!-- Include end security note -->
-```
-````
 
 ---
 
 ## Project and community
 
-LXD is free software and developed under the [Apache 2 license](https://www.apache.org/licenses/LICENSE-2.0).
+LXD is free software and released under [AGPL-3.0-only](https://www.gnu.org/licenses/agpl-3.0.en.html) (it may contain some contributions that are licensed under the Apache-2.0 license, see [License and copyright](contributing)).
 It’s an open source project that warmly welcomes community projects, contributions, suggestions, fixes and constructive feedback.
 
 The LXD project is sponsored by [Canonical Ltd](https://www.canonical.com).
@@ -116,9 +108,8 @@ The LXD project is sponsored by [Canonical Ltd](https://www.canonical.com).
 :titlesonly:
 
 :diataxis:self
-:diataxis:tutorial/index
+:diataxis:Tutorial <tutorial/first_steps>
 :diataxis:howto/index
 :diataxis:explanation/index
 :diataxis:reference/index
-:diataxis:Switch to topical navigation <https://documentation.ubuntu.com/lxd/to/latest/>
 ```

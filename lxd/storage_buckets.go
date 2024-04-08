@@ -10,47 +10,49 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/canonical/lxd/lxd/auth"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/lifecycle"
 	"github.com/canonical/lxd/lxd/project"
 	"github.com/canonical/lxd/lxd/request"
 	"github.com/canonical/lxd/lxd/response"
-	"github.com/canonical/lxd/lxd/revert"
 	storagePools "github.com/canonical/lxd/lxd/storage"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/entity"
+	"github.com/canonical/lxd/shared/revert"
 	"github.com/canonical/lxd/shared/version"
 )
 
 var storagePoolBucketsCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}/buckets",
 
-	Get:  APIEndpointAction{Handler: storagePoolBucketsGet, AccessHandler: allowProjectPermission("storage-volumes", "view")},
-	Post: APIEndpointAction{Handler: storagePoolBucketsPost, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
+	Get:  APIEndpointAction{Handler: storagePoolBucketsGet, AccessHandler: allowAuthenticated},
+	Post: APIEndpointAction{Handler: storagePoolBucketsPost, AccessHandler: allowPermission(entity.TypeProject, auth.EntitlementCanCreateStorageBuckets)},
 }
 
 var storagePoolBucketCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}/buckets/{bucketName}",
 
-	Delete: APIEndpointAction{Handler: storagePoolBucketDelete, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
-	Get:    APIEndpointAction{Handler: storagePoolBucketGet, AccessHandler: allowProjectPermission("storage-volumes", "view")},
-	Patch:  APIEndpointAction{Handler: storagePoolBucketPut, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
-	Put:    APIEndpointAction{Handler: storagePoolBucketPut, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
+	Delete: APIEndpointAction{Handler: storagePoolBucketDelete, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanDelete, "poolName", "bucketName")},
+	Get:    APIEndpointAction{Handler: storagePoolBucketGet, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanView, "poolName", "bucketName")},
+	Patch:  APIEndpointAction{Handler: storagePoolBucketPut, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanEdit, "poolName", "bucketName")},
+	Put:    APIEndpointAction{Handler: storagePoolBucketPut, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanEdit, "poolName", "bucketName")},
 }
 
 var storagePoolBucketKeysCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}/buckets/{bucketName}/keys",
 
-	Get:  APIEndpointAction{Handler: storagePoolBucketKeysGet, AccessHandler: allowProjectPermission("storage-volumes", "view")},
-	Post: APIEndpointAction{Handler: storagePoolBucketKeysPost, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
+	Get:  APIEndpointAction{Handler: storagePoolBucketKeysGet, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanView, "poolName", "bucketName")},
+	Post: APIEndpointAction{Handler: storagePoolBucketKeysPost, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanEdit, "poolName", "bucketName")},
 }
 
 var storagePoolBucketKeyCmd = APIEndpoint{
 	Path: "storage-pools/{poolName}/buckets/{bucketName}/keys/{keyName}",
 
-	Delete: APIEndpointAction{Handler: storagePoolBucketKeyDelete, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
-	Get:    APIEndpointAction{Handler: storagePoolBucketKeyGet, AccessHandler: allowProjectPermission("storage-volumes", "view")},
-	Put:    APIEndpointAction{Handler: storagePoolBucketKeyPut, AccessHandler: allowProjectPermission("storage-volumes", "manage-storage-volumes")},
+	Delete: APIEndpointAction{Handler: storagePoolBucketKeyDelete, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanEdit, "poolName", "bucketName")},
+	Get:    APIEndpointAction{Handler: storagePoolBucketKeyGet, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanView, "poolName", "bucketName")},
+	Put:    APIEndpointAction{Handler: storagePoolBucketKeyPut, AccessHandler: allowPermission(entity.TypeStorageBucket, auth.EntitlementCanEdit, "poolName", "bucketName")},
 }
 
 // API endpoints
@@ -150,7 +152,7 @@ var storagePoolBucketKeyCmd = APIEndpoint{
 func storagePoolBucketsGet(d *Daemon, r *http.Request) response.Response {
 	s := d.State()
 
-	requestProjectName := projectParam(r)
+	requestProjectName := request.ProjectParam(r)
 	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, requestProjectName)
 	if err != nil {
 		return response.SmartError(err)
@@ -193,17 +195,33 @@ func storagePoolBucketsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
+	request.SetCtxValue(r, request.CtxEffectiveProjectName, bucketProjectName)
+	userHasPermission, err := s.Authorizer.GetPermissionChecker(r.Context(), r, auth.EntitlementCanView, entity.TypeStorageBucket)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	var filteredDBBuckets []*db.StorageBucket
+
+	for _, bucket := range dbBuckets {
+		if !userHasPermission(entity.StorageBucketURL(requestProjectName, "", poolName, bucket.Name)) {
+			continue
+		}
+
+		filteredDBBuckets = append(filteredDBBuckets, bucket)
+	}
+
 	// Sort by bucket name.
-	sort.SliceStable(dbBuckets, func(i, j int) bool {
-		bucketA := dbBuckets[i]
-		bucketB := dbBuckets[j]
+	sort.SliceStable(filteredDBBuckets, func(i, j int) bool {
+		bucketA := filteredDBBuckets[i]
+		bucketB := filteredDBBuckets[j]
 
 		return bucketA.Name < bucketB.Name
 	})
 
 	if util.IsRecursionRequest(r) {
-		buckets := make([]*api.StorageBucket, 0, len(dbBuckets))
-		for _, dbBucket := range dbBuckets {
+		buckets := make([]*api.StorageBucket, 0, len(filteredDBBuckets))
+		for _, dbBucket := range filteredDBBuckets {
 			u := pool.GetBucketURL(dbBucket.Name)
 			if u != nil {
 				dbBucket.S3URL = u.String()
@@ -215,8 +233,8 @@ func storagePoolBucketsGet(d *Daemon, r *http.Request) response.Response {
 		return response.SyncResponse(true, buckets)
 	}
 
-	urls := make([]string, 0, len(dbBuckets))
-	for _, dbBucket := range dbBuckets {
+	urls := make([]string, 0, len(filteredDBBuckets))
+	for _, dbBucket := range filteredDBBuckets {
 		urls = append(urls, dbBucket.StorageBucket.URL(version.APIVersion, poolName, requestProjectName).String())
 	}
 
@@ -271,7 +289,7 @@ func storagePoolBucketGet(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -295,7 +313,7 @@ func storagePoolBucketGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	targetMember := queryParam(r, "target")
+	targetMember := request.QueryParam(r, "target")
 	memberSpecific := targetMember != ""
 
 	var bucket *db.StorageBucket
@@ -355,7 +373,7 @@ func storagePoolBucketsPost(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -496,7 +514,7 @@ func storagePoolBucketPut(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -524,7 +542,7 @@ func storagePoolBucketPut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	if r.Method == http.MethodPatch {
-		targetMember := queryParam(r, "target")
+		targetMember := request.QueryParam(r, "target")
 		memberSpecific := targetMember != ""
 
 		var bucket *db.StorageBucket
@@ -593,7 +611,7 @@ func storagePoolBucketDelete(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -725,7 +743,7 @@ func storagePoolBucketKeysGet(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -751,7 +769,7 @@ func storagePoolBucketKeysGet(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// If target is set, get buckets only for this cluster members.
-	targetMember := queryParam(r, "target")
+	targetMember := request.QueryParam(r, "target")
 	memberSpecific := targetMember != ""
 
 	var dbBucket *db.StorageBucket
@@ -830,7 +848,7 @@ func storagePoolBucketKeysPost(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -905,7 +923,7 @@ func storagePoolBucketKeyDelete(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -988,7 +1006,7 @@ func storagePoolBucketKeyGet(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -1017,7 +1035,7 @@ func storagePoolBucketKeyGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	targetMember := queryParam(r, "target")
+	targetMember := request.QueryParam(r, "target")
 	memberSpecific := targetMember != ""
 
 	var bucketKey *db.StorageBucketKey
@@ -1088,7 +1106,7 @@ func storagePoolBucketKeyPut(d *Daemon, r *http.Request) response.Response {
 		return resp
 	}
 
-	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, projectParam(r))
+	bucketProjectName, err := project.StorageBucketProject(r.Context(), s.DB.Cluster, request.ProjectParam(r))
 	if err != nil {
 		return response.SmartError(err)
 	}
